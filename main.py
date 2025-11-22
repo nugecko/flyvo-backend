@@ -25,14 +25,22 @@ class SearchParams(BaseModel):
 
 class FlightOption(BaseModel):
     id: str
-    airline: str
+    airline: str               # Human friendly name, for display
+    airlineCode: Optional[str] = None  # Two letter IATA code, for filters etc
     price: float
     currency: str
     departureDate: str
     returnDate: str
     stops: int
-    durationMinutes: int
-    bookingUrl: Optional[str] = None
+
+    # Durations
+    durationMinutes: int                # numeric
+    totalDurationMinutes: Optional[int] = None  # duplicate for template convenience
+    duration: Optional[str] = None      # ISO duration string like "PT3H25M"
+
+    # Links
+    bookingUrl: Optional[str] = None    # our internal name
+    url: Optional[str] = None           # generic url for Base44 Select button
 
 
 # ------------- FastAPI app ------------- #
@@ -66,8 +74,7 @@ if AMADEUS_API_KEY and AMADEUS_API_SECRET:
 
 
 # ------------- Airline maps ------------- #
-# This is intentionally big rather than perfect.
-# Unknown codes will still work, they just show the code and have no bookingUrl.
+# Big but not exhaustive. Unknown codes still work, they just get no booking URL.
 
 AIRLINE_NAMES = {
     # Europe
@@ -98,14 +105,9 @@ AIRLINE_NAMES = {
     "DS": "easyJet Switzerland",
     "A3": "Aegean Airlines",
     "TK": "Turkish Airlines",
-    "PG": "Bangkok Airways",  # sometimes in Europe connections
     "LG": "Luxair",
     "X3": "TUIfly",
-    "BAW": "British Airways",  # sometimes BA uses BAW in some systems
-
-    # UK specific brands
     "LS": "Jet2",
-    "MT": "Thomas Cook Airlines",  # legacy but may appear in some data
     "VS": "Virgin Atlantic",
 
     # Middle East
@@ -142,7 +144,6 @@ AIRLINE_NAMES = {
     # Asia
     "SQ": "Singapore Airlines",
     "CX": "Cathay Pacific",
-    "KA": "Cathay Dragon",  # legacy but may appear
     "JL": "Japan Airlines",
     "NH": "ANA All Nippon Airways",
     "KE": "Korean Air",
@@ -182,12 +183,10 @@ AIRLINE_NAMES = {
     "HM": "Air Seychelles",
     "WB": "RwandAir",
 
-    # Plus some common low cost and regional
+    # Low cost and regional
     "XR": "Corendon Airlines",
     "XQ": "SunExpress",
     "PC": "Pegasus Airlines",
-    "VY": "Vueling",
-    "TO": "Transavia France",
 }
 
 AIRLINE_BOOKING_URLS = {
@@ -326,24 +325,32 @@ def dummy_results(params: SearchParams) -> List[FlightOption]:
         FlightOption(
             id="TK123",
             airline="Turkish Airlines",
+            airlineCode="TK",
             price=1299,
             currency="GBP",
             departureDate=params.earliestDeparture.isoformat(),
             returnDate=params.latestDeparture.isoformat(),
             stops=1,
             durationMinutes=240,
+            totalDurationMinutes=240,
+            duration="PT4H0M",
             bookingUrl=AIRLINE_BOOKING_URLS.get("TK"),
+            url=AIRLINE_BOOKING_URLS.get("TK"),
         ),
         FlightOption(
             id="LH456",
             airline="Lufthansa",
+            airlineCode="LH",
             price=1550,
             currency="GBP",
             departureDate=params.earliestDeparture.isoformat(),
             returnDate=params.latestDeparture.isoformat(),
             stops=1,
             durationMinutes=270,
+            totalDurationMinutes=270,
+            duration="PT4H30M",
             bookingUrl=AIRLINE_BOOKING_URLS.get("LH"),
+            url=AIRLINE_BOOKING_URLS.get("LH"),
         ),
     ]
 
@@ -377,13 +384,17 @@ def map_amadeus_offer_to_option(offer, params: SearchParams, index: int) -> Flig
     return FlightOption(
         id=f"offer_{index}",
         airline=airline_name,
+        airlineCode=airline_code or None,
         price=price,
         currency=currency,
         departureDate=departure_date,
         returnDate=return_date,
         stops=stops_outbound,
         durationMinutes=duration_minutes,
+        totalDurationMinutes=duration_minutes,
+        duration=iso_duration,
         bookingUrl=booking_url,
+        url=booking_url,
     )
 
 
@@ -421,14 +432,13 @@ def search_business(params: SearchParams):
             departureDate=params.earliestDeparture.isoformat(),
             returnDate=params.latestDeparture.isoformat(),
             adults=params.passengers,
-            travelClass=params.cabin,  # "BUSINESS" from frontend
+            travelClass=params.cabin,
             currencyCode="GBP",
             max=20,
         )
 
         offers = response.data or []
 
-        # If Amadeus returned nothing, fall back to dummy data
         if not offers:
             return {
                 "status": "no_business_found",
@@ -441,7 +451,6 @@ def search_business(params: SearchParams):
             for i, offer in enumerate(offers)
         ]
 
-        # Sort by price, do not filter by maxPrice for now
         mapped.sort(key=lambda x: x.price)
 
         return {
