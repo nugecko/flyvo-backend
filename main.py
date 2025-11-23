@@ -1,9 +1,9 @@
 import os
 import re
-from datetime import date, timedelta
-from typing import List, Optional
+from datetime import date, timedelta, datetime
+from typing import List, Optional, Dict
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from amadeus import Client, ResponseError
@@ -41,6 +41,19 @@ class FlightOption(BaseModel):
     url: Optional[str] = None
 
 
+class WalletEvent(BaseModel):
+    date: datetime
+    description: str
+    change: int
+    balance_after: int
+
+
+class AdminCreditRequest(BaseModel):
+    userId: str
+    amount: int      # positive to add credits, negative to remove
+    reason: str
+
+
 # ------------- FastAPI app ------------- #
 
 app = FastAPI()
@@ -69,6 +82,18 @@ if AMADEUS_API_KEY and AMADEUS_API_SECRET:
         client_secret=AMADEUS_API_SECRET,
         hostname=hostname,
     )
+
+
+# ------------- Wallet storage and admin config ------------- #
+
+# Simple admin token for securing admin endpoints
+ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN")
+
+# In memory wallet balances per user id
+user_wallets: Dict[str, int] = {}
+
+# In memory wallet history per user id
+wallet_history: Dict[str, List[WalletEvent]] = {}
 
 
 # ------------- Airline maps ------------- #
@@ -403,6 +428,41 @@ def generate_date_pairs(params: SearchParams, max_pairs: int = 20):
     return pairs
 
 
+def adjust_user_credits(user_id: str, amount: int, reason: str) -> int:
+    """
+    Adjust credits for a given user.
+
+    amount:
+        positive value adds credits
+        negative value removes credits
+
+    Returns the new wallet balance.
+    """
+
+    current_balance = user_wallets.get(user_id, 0)
+    new_balance = current_balance + amount
+
+    if new_balance < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Insufficient credits. Adjustment would result in negative balance.",
+        )
+
+    user_wallets[user_id] = new_balance
+
+    event = WalletEvent(
+        date=datetime.utcnow(),
+        description=reason,
+        change=amount,
+        balance_after=new_balance,
+    )
+
+    history = wallet_history.setdefault(user_id, [])
+    history.insert(0, event)
+
+    return new_balance
+
+
 # ------------- Routes ------------- #
 
 @app.get("/")
@@ -413,6 +473,47 @@ def home():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/admin/add-credits")
+def admin_add_credits(
+    payload: AdminCreditRequest,
+    x_admin_token: Optional[str] = Header(None),
+):
+    """
+    Admin endpoint to adjust a user's credits.
+
+    Secured with the X-Admin-Token header that must match ADMIN_API_TOKEN.
+    """
+
+    if ADMIN_API_TOKEN is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Admin API token is not configured on the server.",
+        )
+
+    if x_admin_token != ADMIN_API_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin token.",
+        )
+
+    if payload.amount == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Amount must be non zero.",
+        )
+
+    new_balance = adjust_user_credits(
+        user_id=payload.userId,
+        amount=payload.amount,
+        reason=payload.reason,
+    )
+
+    return {
+        "userId": payload.userId,
+        "newBalance": new_balance,
+    }
 
 
 @app.post("/search-business")
