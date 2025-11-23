@@ -566,24 +566,27 @@ def admin_update_credits(
 @app.get("/profile")
 def get_profile(x_user_id: str = Header(None, alias="X-User-Id")):
     """
-    Profile endpoint used by the Flyvo app.
+    Profile endpoint used by the Flyvo frontend.
 
-    For now we rely on Base44 to send X-User-Id header
-    containing the backend user id that matches the one
-    used in /admin/update-credits.
+    Frontend calls:
+      GET /profile
+    and includes header:
+      X-User-Id: <base44_user_id>
+
+    We look up that user in USER_WALLETS and return wallet_credits
+    in the schema Base44 expects.
     """
 
-    if not x_user_id:
-        raise HTTPException(status_code=401, detail="Missing X-User-Id header")
+    if x_user_id is None:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
 
     wallet_balance = USER_WALLETS.get(x_user_id, 0)
 
-    # Basic dummy data, you can wire real plan info later
     return {
         "user": {
             "name": "Flyvo User",
             "email": "user@example.com",
-            "plan": "BASIC",
+            "plan": "BASIC",  # "BASIC", "PRO", "ELITE", or null
         },
         "subscription": {
             "plan": "Flyvo Free",
@@ -593,10 +596,11 @@ def get_profile(x_user_id: str = Header(None, alias="X-User-Id")):
         },
         "wallet": {
             "wallet_credits": wallet_balance,
-            "history": [],  # history not implemented yet
+            "history": [],
         },
         "alerts": {
             "active_count": 0,
             "total_count": 0,
         },
     }
+
