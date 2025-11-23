@@ -263,7 +263,7 @@ AIRLINE_BOOKING_URLS = {
     "AK": "https://www.airasia.com/",
     "QF": "https://www.qantas.com/",
     "NZ": "https://www.airnewzealand.co.uk/",
-    "VA": "https://www.virginaustralia.com/",
+    "VA": "https://www.virginatlustralia.com/",
     "JQ": "https://www.jetstar.com/",
     "ET": "https://www.ethiopianairlines.com/",
     "KQ": "https://www.kenya-airways.com/",
@@ -575,3 +575,14 @@ def admin_add_credits(
         "userId": payload.userId,
         "newBalance": new_balance,
     }
+
+
+@app.post("/admin/update-credits")
+def admin_update_credits(
+    payload: CreditUpdateRequest,
+    x_admin_token: str = Header(None, alias="X-Admin-Token"),
+):
+    """
+    Alias for admin_add_credits so both /admin/add-credits and /admin/update-credits work.
+    """
+    return admin_add_credits(payload, x_admin_token)
