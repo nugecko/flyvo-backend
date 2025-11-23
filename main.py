@@ -603,4 +603,52 @@ def get_profile(x_user_id: str = Header(None, alias="X-User-Id")):
             "total_count": 0,
         },
     }
+# ------------- User profile endpoint ------------- #
+
+from fastapi import Request
+
+@app.get("/profile")
+def get_profile(
+    request: Request,
+    x_user_id: str = Header(None, alias="X-User-Id")
+):
+    if not x_user_id:
+        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
+
+    # Pull wallet balance from stored credits
+    wallet_balance = USER_WALLETS.get(x_user_id, 0)
+
+    # Dummy user info for now
+    user = {
+        "name": "Flyvo User",
+        "email": "user@example.com",
+        "plan": "BASIC",
+    }
+
+    # Dummy subscription info
+    subscription = {
+        "plan": "Flyvo Free",
+        "billing_cycle": "N/A",
+        "renewal_date": None,
+        "monthly_credits": 0,
+    }
+
+    # Wallet section
+    wallet = {
+        "wallet_credits": wallet_balance,
+        "history": []  # can implement later
+    }
+
+    # Dummy alerts
+    alerts = {
+        "active_count": 0,
+        "total_count": 0
+    }
+
+    return {
+        "user": user,
+        "subscription": subscription,
+        "wallet": wallet,
+        "alerts": alerts,
+    }
 
