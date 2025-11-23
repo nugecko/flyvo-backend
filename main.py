@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import date
+from datetime import date, timedelta
 from typing import List, Optional
 
 from fastapi import FastAPI
@@ -25,22 +25,20 @@ class SearchParams(BaseModel):
 
 class FlightOption(BaseModel):
     id: str
-    airline: str               # Human friendly name, for display
-    airlineCode: Optional[str] = None  # Two letter IATA code, for filters etc
+    airline: str
+    airlineCode: Optional[str] = None
     price: float
     currency: str
     departureDate: str
     returnDate: str
     stops: int
 
-    # Durations
-    durationMinutes: int                # numeric
-    totalDurationMinutes: Optional[int] = None  # duplicate for template convenience
-    duration: Optional[str] = None      # ISO duration string like "PT3H25M"
+    durationMinutes: int
+    totalDurationMinutes: Optional[int] = None
+    duration: Optional[str] = None
 
-    # Links
-    bookingUrl: Optional[str] = None    # our internal name
-    url: Optional[str] = None           # generic url for Base44 Select button
+    bookingUrl: Optional[str] = None
+    url: Optional[str] = None
 
 
 # ------------- FastAPI app ------------- #
@@ -60,7 +58,7 @@ app.add_middleware(
 
 AMADEUS_API_KEY = os.getenv("AMADEUS_API_KEY")
 AMADEUS_API_SECRET = os.getenv("AMADEUS_API_SECRET")
-AMADEUS_ENV = os.getenv("AMADEUS_ENV", "test")  # "test" or "production"
+AMADEUS_ENV = os.getenv("AMADEUS_ENV", "test")
 
 hostname = "production" if AMADEUS_ENV.lower() == "production" else "test"
 
@@ -74,7 +72,6 @@ if AMADEUS_API_KEY and AMADEUS_API_SECRET:
 
 
 # ------------- Airline maps ------------- #
-# Big but not exhaustive. Unknown codes still work, they just get no booking URL.
 
 AIRLINE_NAMES = {
     # Europe
@@ -109,7 +106,6 @@ AIRLINE_NAMES = {
     "X3": "TUIfly",
     "LS": "Jet2",
     "VS": "Virgin Atlantic",
-
     # Middle East
     "LY": "El Al",
     "EK": "Emirates",
@@ -120,7 +116,6 @@ AIRLINE_NAMES = {
     "WY": "Oman Air",
     "GF": "Gulf Air",
     "ME": "Middle East Airlines",
-
     # North America
     "AA": "American Airlines",
     "DL": "Delta Air Lines",
@@ -132,7 +127,6 @@ AIRLINE_NAMES = {
     "NK": "Spirit Airlines",
     "AS": "Alaska Airlines",
     "HA": "Hawaiian Airlines",
-
     # Latin America
     "LA": "LATAM Airlines",
     "AV": "Avianca",
@@ -140,7 +134,6 @@ AIRLINE_NAMES = {
     "CM": "Copa Airlines",
     "G3": "Gol Linhas Aéreas",
     "UX": "Air Europa",
-
     # Asia
     "SQ": "Singapore Airlines",
     "CX": "Cathay Pacific",
@@ -166,13 +159,11 @@ AIRLINE_NAMES = {
     "TR": "Scoot",
     "D7": "AirAsia X",
     "AK": "AirAsia",
-
     # Oceania
     "QF": "Qantas",
     "NZ": "Air New Zealand",
     "VA": "Virgin Australia",
     "JQ": "Jetstar",
-
     # Africa
     "ET": "Ethiopian Airlines",
     "KQ": "Kenya Airways",
@@ -182,7 +173,6 @@ AIRLINE_NAMES = {
     "SA": "South African Airways",
     "HM": "Air Seychelles",
     "WB": "RwandAir",
-
     # Low cost and regional
     "XR": "Corendon Airlines",
     "XQ": "SunExpress",
@@ -190,7 +180,6 @@ AIRLINE_NAMES = {
 }
 
 AIRLINE_BOOKING_URLS = {
-    # Europe
     "LH": "https://www.lufthansa.com/gb/en/flight-search",
     "BA": "https://www.britishairways.com/travel/home/public/en_gb",
     "AF": "https://wwws.airfrance.co.uk/",
@@ -222,7 +211,6 @@ AIRLINE_BOOKING_URLS = {
     "X3": "https://www.tuifly.com/",
     "LS": "https://www.jet2.com/",
     "VS": "https://www.virginatlantic.com/",
-    # Middle East
     "LY": "https://www.elal.com/en/",
     "EK": "https://www.emirates.com/uk/english/",
     "QR": "https://www.qatarairways.com/en-gb/homepage.html",
@@ -232,7 +220,6 @@ AIRLINE_BOOKING_URLS = {
     "WY": "https://www.omanair.com/",
     "GF": "https://www.gulfair.com/",
     "ME": "https://www.mea.com.lb/english",
-    # North America
     "AA": "https://www.aa.com/",
     "DL": "https://www.delta.com/",
     "UA": "https://www.united.com/",
@@ -243,14 +230,12 @@ AIRLINE_BOOKING_URLS = {
     "NK": "https://www.spirit.com/",
     "AS": "https://www.alaskaair.com/",
     "HA": "https://www.hawaiianairlines.com/",
-    # Latin America
     "LA": "https://www.latamairlines.com/",
     "AV": "https://www.avianca.com/",
     "AM": "https://aeromexico.com/en-gb",
     "CM": "https://www.copaair.com/",
     "G3": "https://www.voegol.com.br/en",
     "UX": "https://www.aireuropa.com/",
-    # Asia
     "SQ": "https://www.singaporeair.com/",
     "CX": "https://www.cathaypacific.com/",
     "JL": "https://www.jal.co.jp/jp/en/",
@@ -275,12 +260,10 @@ AIRLINE_BOOKING_URLS = {
     "TR": "https://www.flyscoot.com/",
     "D7": "https://www.airasia.com/",
     "AK": "https://www.airasia.com/",
-    # Oceania
     "QF": "https://www.qantas.com/",
     "NZ": "https://www.airnewzealand.co.uk/",
     "VA": "https://www.virginaustralia.com/",
     "JQ": "https://www.jetstar.com/",
-    # Africa
     "ET": "https://www.ethiopianairlines.com/",
     "KQ": "https://www.kenya-airways.com/",
     "MS": "https://www.egyptair.com/",
@@ -289,7 +272,6 @@ AIRLINE_BOOKING_URLS = {
     "SA": "https://www.flysaa.com/",
     "HM": "https://www.airseychelles.com/",
     "WB": "https://www.rwandair.com/",
-    # Low cost and regional
     "XR": "https://www.corendonairlines.com/",
     "XQ": "https://www.sunexpress.com/en/",
     "PC": "https://www.flypgs.com/en",
@@ -299,28 +281,20 @@ AIRLINE_BOOKING_URLS = {
 # ------------- Helpers ------------- #
 
 def parse_iso_duration_to_minutes(iso_duration: str) -> int:
-    """
-    Parse an ISO 8601 duration like "PT3H25M" or "P1DT2H10M" to total minutes.
-    """
     if not iso_duration:
         return 0
-
     pattern = r"P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?"
     match = re.match(pattern, iso_duration)
     if not match:
         return 0
-
     days_str, hours_str, minutes_str = match.groups()
     days = int(days_str) if days_str else 0
     hours = int(hours_str) if hours_str else 0
     minutes = int(minutes_str) if minutes_str else 0
-
-    total_minutes = (days * 24 + hours) * 60 + minutes
-    return total_minutes
+    return (days * 24 + hours) * 60 + minutes
 
 
 def dummy_results(params: SearchParams) -> List[FlightOption]:
-    """Fallback demo results for when Amadeus has nothing or on error."""
     return [
         FlightOption(
             id="TK123",
@@ -362,11 +336,9 @@ def map_amadeus_offer_to_option(offer, params: SearchParams, index: int) -> Flig
     first_itinerary = offer["itineraries"][0]
     last_itinerary = offer["itineraries"][-1]
 
-    # Dates for basic card display
     departure_date = first_itinerary["segments"][0]["departure"]["at"][:10]
     return_date = last_itinerary["segments"][-1]["arrival"]["at"][:10]
 
-    # Airline code and full name
     airline_code = ""
     if "validatingAirlineCodes" in offer and offer["validatingAirlineCodes"]:
         airline_code = offer["validatingAirlineCodes"][0]
@@ -374,11 +346,9 @@ def map_amadeus_offer_to_option(offer, params: SearchParams, index: int) -> Flig
     airline_name = AIRLINE_NAMES.get(airline_code, airline_code or "Airline")
     booking_url = AIRLINE_BOOKING_URLS.get(airline_code)
 
-    # Duration from Amadeus (ISO 8601 string)
     iso_duration = first_itinerary.get("duration", "PT0H0M")
     duration_minutes = parse_iso_duration_to_minutes(iso_duration)
 
-    # Number of stops on outbound
     stops_outbound = len(first_itinerary["segments"]) - 1
 
     return FlightOption(
@@ -398,6 +368,41 @@ def map_amadeus_offer_to_option(offer, params: SearchParams, index: int) -> Flig
     )
 
 
+def generate_date_pairs(params: SearchParams, max_pairs: int = 20):
+    """
+    Generate (departure, return) pairs within the window.
+    For MVP we support stay lengths of 4 and 7 nights inside the
+    minStayDays and maxStayDays range, up to max_pairs combinations.
+    """
+    stays: List[int] = []
+
+    # Use explicit stay length if user chose a single value
+    if params.minStayDays == params.maxStayDays:
+        stays = [params.minStayDays]
+    else:
+        # Otherwise pick 4 and 7 if they fit inside the range
+        for s in (4, 7):
+            if params.minStayDays <= s <= params.maxStayDays:
+                stays.append(s)
+
+    if not stays:
+        stays = [params.minStayDays]
+
+    pairs = []
+    current = params.earliestDeparture
+
+    while current <= params.latestDeparture and len(pairs) < max_pairs:
+        for stay in stays:
+            ret = current + timedelta(days=stay)
+            if ret <= params.latestDeparture:
+                pairs.append((current, ret))
+                if len(pairs) >= max_pairs:
+                    break
+        current += timedelta(days=1)
+
+    return pairs
+
+
 # ------------- Routes ------------- #
 
 @app.get("/")
@@ -413,11 +418,15 @@ def health():
 @app.post("/search-business")
 def search_business(params: SearchParams):
     """
-    Business search endpoint used by the Base44 frontend.
-    Tries Amadeus first, falls back to dummy data if nothing is found or on error.
+    Main endpoint used by the Base44 frontend.
+
+    Logic:
+      * If Amadeus is not configured: always return dummy flights
+      * If date window is one day or less: one simple Amadeus call
+      * If window is up to 14 days: scan multiple date combinations
+      * If window is larger than 14 days: fall back to single call
     """
 
-    # If Amadeus is not configured at all, always use dummy data
     if amadeus is None:
         return {
             "status": "ok",
@@ -426,23 +435,65 @@ def search_business(params: SearchParams):
         }
 
     try:
-        response = amadeus.shopping.flight_offers_search.get(
-            originLocationCode=params.origin,
-            destinationLocationCode=params.destination,
-            departureDate=params.earliestDeparture.isoformat(),
-            returnDate=params.latestDeparture.isoformat(),
-            adults=params.passengers,
-            travelClass=params.cabin,
-            currencyCode="GBP",
-            max=20,
-        )
+        window_days = (params.latestDeparture - params.earliestDeparture).days + 1
+        offers = []
 
-        offers = response.data or []
+        if window_days <= 1:
+            # Exact dates search, current behaviour
+            resp = amadeus.shopping.flight_offers_search.get(
+                originLocationCode=params.origin,
+                destinationLocationCode=params.destination,
+                departureDate=params.earliestDeparture.isoformat(),
+                returnDate=params.latestDeparture.isoformat(),
+                adults=params.passengers,
+                travelClass=params.cabin,
+                currencyCode="GBP",
+                max=20,
+            )
+            offers = resp.data or []
+
+        elif window_days <= 14:
+            # Flexible search inside the window, limited combinations
+            date_pairs = generate_date_pairs(params, max_pairs=20)
+            for dep, ret in date_pairs:
+                try:
+                    resp = amadeus.shopping.flight_offers_search.get(
+                        originLocationCode=params.origin,
+                        destinationLocationCode=params.destination,
+                        departureDate=dep.isoformat(),
+                        returnDate=ret.isoformat(),
+                        adults=params.passengers,
+                        travelClass=params.cabin,
+                        currencyCode="GBP",
+                        max=5,
+                    )
+                    offers.extend(resp.data or [])
+                except ResponseError as e:
+                    print("Amadeus error for", dep, "to", ret, ":", e)
+                    continue
+
+        else:
+            # Safety net to protect API quota
+            print(
+                "Date window larger than 14 days, using single Amadeus call "
+                "from earliestDeparture to latestDeparture."
+            )
+            resp = amadeus.shopping.flight_offers_search.get(
+                originLocationCode=params.origin,
+                destinationLocationCode=params.destination,
+                departureDate=params.earliestDeparture.isoformat(),
+                returnDate=params.latestDeparture.isoformat(),
+                adults=params.passengers,
+                travelClass=params.cabin,
+                currencyCode="GBP",
+                max=20,
+            )
+            offers = resp.data or []
 
         if not offers:
             return {
-                "status": "no_business_found",
-                "source": "amadeus_fallback_dummy",
+                "status": "ok",
+                "source": "amadeus_no_results_fallback_dummy",
                 "options": [o.dict() for o in dummy_results(params)],
             }
 
