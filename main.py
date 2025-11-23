@@ -527,7 +527,8 @@ def search_business(params: SearchParams):
 
 class CreditUpdateRequest(BaseModel):
     userId: str
-    delta: int
+    amount: Optional[int] = None
+    delta: Optional[int] = None
     reason: Optional[str] = None
 
 
@@ -544,7 +545,10 @@ def admin_add_credits(
     Admin only endpoint to adjust user wallet credits.
 
     Expects header: X-Admin-Token = ADMIN_API_TOKEN
-    Body: { "userId": "...", "delta": 250, "reason": "..." }
+    Body can use either:
+      { "userId": "...", "amount": 250, "reason": "..." }
+    or:
+      { "userId": "...", "delta": 250, "reason": "..." }
 
     Returns: { "userId": "...", "newBalance": 250 }
     """
@@ -555,10 +559,18 @@ def admin_add_credits(
     if x_admin_token != ADMIN_API_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid admin token")
 
+    # Accept both "delta" and "amount"
+    change_amount = payload.delta if payload.delta is not None else payload.amount
+    if change_amount is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing amount or delta field in request body",
+        )
+
     user_id = payload.userId
     current_balance = USER_WALLETS.get(user_id, 0)
 
-    new_balance = current_balance + payload.delta
+    new_balance = current_balance + change_amount
     if new_balance < 0:
         new_balance = 0
 
