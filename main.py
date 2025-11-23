@@ -1,9 +1,9 @@
 import os
 import re
-from datetime import date, timedelta
-from typing import List, Optional
+from datetime import date, timedelta, datetime
+from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from amadeus import Client, ResponseError
@@ -525,15 +525,28 @@ class CreditUpdateRequest(BaseModel):
     reason: Optional[str] = None
 
 
-USER_WALLETS: dict[str, int] = {}
+# In memory stores for MVP
+USER_WALLETS: Dict[str, int] = {}
+USER_WALLET_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
 
 
+@app.post("/admin/update-credits")
 @app.post("/admin/add-credits")
-def admin_add_credits(
+def admin_update_credits(
     payload: CreditUpdateRequest,
     x_admin_token: str = Header(None, alias="X-Admin-Token"),
 ):
-    # Debug logging for token investigation
+    """
+    Admin endpoint to adjust user wallet credits.
+
+    Accepts multiple possible field names for the credit change:
+    - delta
+    - amount
+    - creditAmount
+    - value
+    """
+
+    # Debug logging for token investigation if needed
     print("DEBUG_received_token:", repr(x_admin_token))
     print("DEBUG_expected_token:", repr(ADMIN_API_TOKEN))
 
@@ -546,18 +559,8 @@ def admin_add_credits(
     if expected == "":
         raise HTTPException(status_code=500, detail="Admin token not configured")
 
-    # Extra debug around equality
-    tokens_equal = received == expected
-    print("DEBUG_tokens_equal:", tokens_equal,
-          "len_received:", len(received),
-          "len_expected:", len(expected))
-
-    if not received:
-        raise HTTPException(status_code=401, detail="Missing admin token")
-
-    # Temporary: do NOT block on mismatch, only log it
-    if not tokens_equal:
-        print("WARNING_admin_token_mismatch_but_continuing")
+    if received != expected:
+        raise HTTPException(status_code=401, detail="Invalid admin token")
 
     # Accept any field name for the credit change
     change_amount = (
@@ -576,22 +579,77 @@ def admin_add_credits(
             detail="Missing credit amount. Expected one of: amount, delta, creditAmount, value.",
         )
 
-    current = USER_WALLETS.get(payload.userId, 0)
+    user_id = payload.userId
+    current = USER_WALLETS.get(user_id, 0)
     new_balance = max(0, current + change_amount)
-    USER_WALLETS[payload.userId] = new_balance
+    USER_WALLETS[user_id] = new_balance
+
+    # Record history entry
+    entry = {
+        "date": datetime.utcnow().isoformat() + "Z",
+        "description": payload.reason or "Manual adjustment",
+        "change": change_amount,
+        "balance_after": new_balance,
+    }
+    USER_WALLET_HISTORY.setdefault(user_id, []).append(entry)
 
     return {
-        "userId": payload.userId,
+        "userId": user_id,
         "newBalance": new_balance,
     }
 
 
-@app.post("/admin/update-credits")
-def admin_update_credits(
-    payload: CreditUpdateRequest,
-    x_admin_token: str = Header(None, alias="X-Admin-Token"),
+# ------------- Profile endpoint ------------- #
+
+@app.get("/profile")
+def get_profile(
+    userId: Optional[str] = Query(None),
+    user_id: Optional[str] = Query(None),
+    email: Optional[str] = Query(None),
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
 ):
     """
-    Alias for admin_add_credits so both /admin/add-credits and /admin/update-credits work.
+    Returns profile data in the schema expected by Base44.
+
+    Tries several ways to determine the user id:
+    - userId query parameter
+    - user_id query parameter
+    - email query parameter
+    - X-User-Id header
     """
-    return admin_add_credits(payload, x_admin_token)
+
+    uid = userId or user_id or email or x_user_id or "test-user-1"
+
+    wallet_balance = USER_WALLETS.get(uid, 0)
+    history = USER_WALLET_HISTORY.get(uid, [])
+
+    # Very simple user info for now, Base44 mainly needs wallet part
+    user_obj = {
+        "name": uid,
+        "email": uid,
+        "plan": None,  # "BASIC", "PRO", "ELITE", or null
+    }
+
+    subscription_obj = {
+        "plan": "Flyvo Free",
+        "billing_cycle": "N/A",
+        "renewal_date": None,
+        "monthly_credits": 0,
+    }
+
+    wallet_obj = {
+        "wallet_credits": wallet_balance,
+        "history": history,
+    }
+
+    alerts_obj = {
+        "active_count": 0,
+        "total_count": 0,
+    }
+
+    return {
+        "user": user_obj,
+        "subscription": subscription_obj,
+        "wallet": wallet_obj,
+        "alerts": alerts_obj,
+    }
