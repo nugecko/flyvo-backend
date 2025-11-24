@@ -375,34 +375,41 @@ def map_amadeus_offer_to_option(offer: Dict[str, Any], params: SearchParams, ind
     )
 
 
-def generate_date_pairs(params: SearchParams, max_pairs: int = 20):
+def generate_date_pairs(params: SearchParams, max_pairs: int = 40) -> List[tuple[date, date]]:
     """
-    Generate (departure, return) pairs within the window.
-    For now, we keep the simple 4 and 7 night stays when in flexible mode.
+    Generate rolling (departure, return) pairs.
+
+    For each stay length between minStayDays and maxStayDays, move the
+    departure one day at a time from earliestDeparture until the computed
+    return date would pass latestDeparture.
+
+    Example: minStayDays = maxStayDays = 7, window 1 Jan to 31 Jan
+    gives 1→8, 2→9, 3→10 and so on until the last pair whose return
+    date is still inside the window.
     """
-    stays: List[int] = []
+    pairs: List[tuple[date, date]] = []
 
-    if params.minStayDays == params.maxStayDays:
-        stays = [params.minStayDays]
-    else:
-        for s in (4, 7):
-            if params.minStayDays <= s <= params.maxStayDays:
-                stays.append(s)
+    if params.minStayDays <= 0 or params.maxStayDays <= 0:
+        return pairs
 
-    if not stays:
-        stays = [params.minStayDays]
+    if params.minStayDays > params.maxStayDays:
+        return pairs
 
-    pairs = []
-    current = params.earliestDeparture
+    # All stay lengths we support in this search
+    stays = list(range(params.minStayDays, params.maxStayDays + 1))
 
-    while current <= params.latestDeparture and len(pairs) < max_pairs:
-        for stay in stays:
+    for stay in stays:
+        # Last possible departure so that return is not after latestDeparture
+        last_departure = params.latestDeparture - timedelta(days=stay)
+        current = params.earliestDeparture
+
+        while current <= last_departure and len(pairs) < max_pairs:
             ret = current + timedelta(days=stay)
-            if ret <= params.latestDeparture:
-                pairs.append((current, ret))
-                if len(pairs) >= max_pairs:
-                    break
-        current += timedelta(days=1)
+            pairs.append((current, ret))
+            current += timedelta(days=1)
+
+        if len(pairs) >= max_pairs:
+            break
 
     return pairs
 
@@ -426,7 +433,8 @@ def search_business(params: SearchParams):
 
     Modes:
       - searchMode = "flexible" (default):
-          keep current behaviour, scan a window with minStay/maxStay.
+          sliding date window inside earliestDeparture-latestDeparture
+          for all stay lengths between minStayDays and maxStayDays.
       - searchMode = "fixed":
           call Amadeus once for earliestDeparture to latestDeparture,
           ignore minStayDays and maxStayDays.
@@ -466,10 +474,11 @@ def search_business(params: SearchParams):
             )
             offers = resp.data or []
         else:
-            # Existing flexible window behaviour
-            window_days = (params.latestDeparture - params.earliestDeparture).days + 1
+            # Flexible sliding window search
+            date_pairs = generate_date_pairs(params, max_pairs=40)
 
-            if window_days <= 1:
+            # If for some reason there are no valid pairs, fall back to a single call
+            if not date_pairs:
                 resp = amadeus.shopping.flight_offers_search.get(
                     originLocationCode=params.origin,
                     destinationLocationCode=params.destination,
@@ -481,9 +490,7 @@ def search_business(params: SearchParams):
                     max=20,
                 )
                 offers = resp.data or []
-
-            elif window_days <= 14:
-                date_pairs = generate_date_pairs(params, max_pairs=20)
+            else:
                 for dep, ret in date_pairs:
                     try:
                         resp = amadeus.shopping.flight_offers_search.get(
@@ -500,23 +507,6 @@ def search_business(params: SearchParams):
                     except ResponseError as e:
                         print("Amadeus error for", dep, "to", ret, ":", e)
                         continue
-
-            else:
-                print(
-                    "Date window larger than 14 days, using single Amadeus call "
-                    "from earliestDeparture to latestDeparture."
-                )
-                resp = amadeus.shopping.flight_offers_search.get(
-                    originLocationCode=params.origin,
-                    destinationLocationCode=params.destination,
-                    departureDate=params.earliestDeparture.isoformat(),
-                    returnDate=params.latestDeparture.isoformat(),
-                    adults=params.passengers,
-                    travelClass=params.cabin,
-                    currencyCode="GBP",
-                    max=20,
-                )
-                offers = resp.data or []
 
         # Apply optional maxPrice filter on top
         if params.maxPrice is not None:
