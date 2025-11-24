@@ -24,6 +24,9 @@ class SearchParams(BaseModel):
     passengers: int = 1
     # "flexible" = current Flyvo window scanning, "fixed" = one off search
     searchMode: Optional[str] = "flexible"
+    # Number of stops filter:
+    # 0 = direct only, 1 = exactly one stop, 2 = two or more stops
+    stopsFilter: Optional[int] = None
 
 
 class FlightOption(BaseModel):
@@ -323,7 +326,7 @@ def dummy_results(params: SearchParams) -> List[FlightOption]:
             currency="GBP",
             departureDate=params.earliestDeparture.isoformat(),
             returnDate=params.latestDeparture.isoformat(),
-            stops=1,
+            stops=2,
             durationMinutes=270,
             totalDurationMinutes=270,
             duration="PT4H30M",
@@ -430,10 +433,19 @@ def search_business(params: SearchParams):
     """
 
     if amadeus is None:
+        options = dummy_results(params)
+
+        # Apply stops filter on dummy data as well
+        if params.stopsFilter is not None:
+            if params.stopsFilter == 2:
+                options = [o for o in options if o.stops >= 2]
+            else:
+                options = [o for o in options if o.stops == params.stopsFilter]
+
         return {
             "status": "ok",
             "source": "dummy_no_amadeus",
-            "options": [o.dict() for o in dummy_results(params)],
+            "options": [o.dict() for o in options],
         }
 
     try:
@@ -519,16 +531,32 @@ def search_business(params: SearchParams):
                 print("Error applying maxPrice filter:", e)
 
         if not offers:
+            options = dummy_results(params)
+
+            # Ensure stops filter still works if Amadeus has no results
+            if params.stopsFilter is not None:
+                if params.stopsFilter == 2:
+                    options = [o for o in options if o.stops >= 2]
+                else:
+                    options = [o for o in options if o.stops == params.stopsFilter]
+
             return {
                 "status": "ok",
                 "source": "amadeus_no_results_fallback_dummy",
-                "options": [o.dict() for o in dummy_results(params)],
+                "options": [o.dict() for o in options],
             }
 
         mapped = [
             map_amadeus_offer_to_option(offer, params, i)
             for i, offer in enumerate(offers)
         ]
+
+        # Apply stops filter on mapped results
+        if params.stopsFilter is not None:
+            if params.stopsFilter == 2:
+                mapped = [o for o in mapped if o.stops >= 2]
+            else:
+                mapped = [o for o in mapped if o.stops == params.stopsFilter]
 
         mapped.sort(key=lambda x: x.price)
 
@@ -540,17 +568,33 @@ def search_business(params: SearchParams):
 
     except ResponseError as e:
         print("Amadeus API error:", e)
+        options = dummy_results(params)
+
+        if params.stopsFilter is not None:
+            if params.stopsFilter == 2:
+                options = [o for o in options if o.stops >= 2]
+            else:
+                options = [o for o in options if o.stops == params.stopsFilter]
+
         return {
             "status": "ok",
             "source": "dummy_on_error",
-            "options": [o.dict() for o in dummy_results(params)],
+            "options": [o.dict() for o in options],
         }
     except Exception as e:
         print("Unexpected error in search_business:", e)
+        options = dummy_results(params)
+
+        if params.stopsFilter is not None:
+            if params.stopsFilter == 2:
+                options = [o for o in options if o.stops >= 2]
+            else:
+                options = [o for o in options if o.stops == params.stopsFilter]
+
         return {
             "status": "ok",
             "source": "dummy_on_error",
-            "options": [o.dict() for o in dummy_results(params)],
+            "options": [o.dict() for o in options],
         }
 
 
