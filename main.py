@@ -76,7 +76,8 @@ app.add_middleware(
 
 # ------------- Duffel client ------------- #
 
-DUFFEL_ACCESS_TOKEN = os.getenv("DUFFEL_ACCESS_TOKEN")
+# Prefer DUFFEL_ACCESS_TOKEN but fall back to DUFFEL_TEST_ACCESS_TOKEN if present
+DUFFEL_ACCESS_TOKEN = os.getenv("DUFFEL_ACCESS_TOKEN") or os.getenv("DUFFEL_TEST_ACCESS_TOKEN")
 duffel = Duffel(access_token=DUFFEL_ACCESS_TOKEN) if DUFFEL_ACCESS_TOKEN else None
 
 
@@ -279,27 +280,25 @@ def search_business(params: SearchParams):
         cabin_value = normalise_cabin(params.cabin)
 
         for dep, ret in date_pairs:
-            slices = [
-                {
-                    "origin": params.origin,
-                    "destination": params.destination,
-                    "departure_date": dep.isoformat(),
-                },
-                {
-                    "origin": params.destination,
-                    "destination": params.origin,
-                    "departure_date": ret.isoformat(),
-                },
-            ]
-            passengers = [{"type": "adult"} for _ in range(params.passengers)]
+            body = {
+                "slices": [
+                    {
+                        "origin": params.origin,
+                        "destination": params.destination,
+                        "departure_date": dep.isoformat(),
+                    },
+                    {
+                        "origin": params.destination,
+                        "destination": params.origin,
+                        "departure_date": ret.isoformat(),
+                    },
+                ],
+                "passengers": [{"type": "adult"} for _ in range(params.passengers)],
+                "cabin_class": cabin_value,
+            }
 
             try:
-                offer_request = duffel.offer_requests.create(
-                    slices=slices,
-                    cabin_class=cabin_value,
-                    passengers=passengers,
-                )
-
+                offer_request = duffel.offer_requests.create(body)
                 offers_iter = duffel.offers.list(offer_request_id=offer_request.id)
 
                 for idx, offer in enumerate(offers_iter):
@@ -308,7 +307,7 @@ def search_business(params: SearchParams):
                     )
 
             except Exception as e:
-                print("Duffel error for", dep, ret, ":", e)
+                print("Duffel error for", dep, ret, ":", repr(e))
                 continue
 
         if not all_options:
@@ -327,7 +326,7 @@ def search_business(params: SearchParams):
         }
 
     except Exception as e:
-        print("Unexpected Duffel search error:", e)
+        print("Unexpected Duffel search error:", repr(e))
         return {
             "status": "error",
             "message": "Unexpected backend error",
@@ -397,22 +396,20 @@ def duffel_test(
     if duffel is None:
         return {"status": "error", "message": "Duffel not configured"}
 
-    slices = [{
-        "origin": origin,
-        "destination": destination,
-        "departure_date": departure.isoformat(),
-    }]
-    pax = [{"type": "adult"} for _ in range(passengers)]
+    body = {
+        "slices": [{
+            "origin": origin,
+            "destination": destination,
+            "departure_date": departure.isoformat(),
+        }],
+        "passengers": [{"type": "adult"} for _ in range(passengers)],
+        "cabin_class": "business",
+    }
 
     try:
-        offer_request = duffel.offer_requests.create(
-            slices=slices,
-            cabin_class="business",
-            passengers=pax,
-        )
+        offer_request = duffel.offer_requests.create(body)
         offers_iter = duffel.offers.list(offer_request_id=offer_request.id)
     except Exception as e:
-        # Print full error to logs and also return it in the response for now
         print("Duffel error in /duffel-test:", repr(e))
         raise HTTPException(
             status_code=500,
@@ -430,4 +427,3 @@ def duffel_test(
         })
 
     return {"status": "ok", "source": "duffel", "offers": results}
-
