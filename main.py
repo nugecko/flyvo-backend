@@ -6,7 +6,7 @@ from typing import List, Optional
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from amadeus import Client, ResponseError
+from amadeus import Client, ResponseError  # Amadeus kept for possible future use
 from duffel_api import Duffel
 
 from airlines import AIRLINE_NAMES, AIRLINE_BOOKING_URLS
@@ -48,23 +48,6 @@ class FlightOption(BaseModel):
     url: Optional[str] = None
 
 
-class DuffelPassenger(BaseModel):
-    id: str  # passenger id from Duffel offer or offer_request
-    phone_number: str
-    email: str
-    born_on: date
-    title: str
-    gender: str
-    family_name: str
-    given_name: str
-    infant_passenger_id: Optional[str] = None
-
-
-class CreateTestOrderRequest(BaseModel):
-    offer_id: str
-    passengers: List[DuffelPassenger]
-
-
 class CreditUpdateRequest(BaseModel):
     userId: str
     amount: Optional[int] = None
@@ -88,7 +71,7 @@ app.add_middleware(
 
 
 # ------------- Amadeus client and admin token ------------- #
-# Amadeus is still configured but no longer used in /search-business
+# Amadeus is configured but not used in search, kept only in case you want it later
 
 AMADEUS_API_KEY = os.getenv("AMADEUS_API_KEY")
 AMADEUS_API_SECRET = os.getenv("AMADEUS_API_SECRET")
@@ -106,14 +89,11 @@ if AMADEUS_API_KEY and AMADEUS_API_SECRET:
     )
 
 
-# ------------- Duffel clients ------------- #
+# ------------- Duffel client ------------- #
 
 DUFFEL_ACCESS_TOKEN = os.getenv("DUFFEL_ACCESS_TOKEN")
-DUFFEL_TEST_ACCESS_TOKEN = os.getenv("DUFFEL_TEST_ACCESS_TOKEN")
-DUFFEL_ALLOW_LIVE_ORDERS = os.getenv("DUFFEL_ALLOW_LIVE_ORDERS", "false").lower() == "true"
 
 duffel = Duffel(access_token=DUFFEL_ACCESS_TOKEN) if DUFFEL_ACCESS_TOKEN else None
-duffel_test = Duffel(access_token=DUFFEL_TEST_ACCESS_TOKEN) if DUFFEL_TEST_ACCESS_TOKEN else None
 
 
 # ------------- Helpers ------------- #
@@ -168,7 +148,7 @@ def dummy_results(params: SearchParams) -> List[FlightOption]:
 
 
 def map_amadeus_offer_to_option(offer, params: SearchParams, index: int) -> FlightOption:
-    # Kept for possible future Amadeus use
+    # Kept for possible future Amadeus use, not used now
     price = float(offer["price"]["grandTotal"])
     currency = offer["price"]["currency"]
 
@@ -223,8 +203,8 @@ def map_duffel_offer_to_option(offer, dep: date, ret: date, index: int) -> Fligh
     try:
         first_segment = outbound_segments[0]
         last_segment = outbound_segments[-1]
-        dep_dt = datetime.fromisoformat(first_segment.departing_at)
-        arr_dt = datetime.fromisoformat(last_segment.arriving_at)
+        dep_dt = datetime.fromisoformat(first_segment.departing_at.replace("Z", "+00:00"))
+        arr_dt = datetime.fromisoformat(last_segment.arriving_at.replace("Z", "+00:00"))
         duration_minutes = int((arr_dt - dep_dt).total_seconds() // 60)
     except Exception:
         duration_minutes = 0
@@ -234,7 +214,7 @@ def map_duffel_offer_to_option(offer, dep: date, ret: date, index: int) -> Fligh
     booking_url = AIRLINE_BOOKING_URLS.get(airline_code)
 
     return FlightOption(
-        id=offer.id,  # very important for booking later
+        id=offer.id,  # important if you ever want to do more with it
         airline=airline_name,
         airlineCode=airline_code or None,
         price=price,
@@ -287,7 +267,7 @@ def apply_filters(options: List[FlightOption], params: SearchParams) -> List[Fli
     if params.maxPrice is not None and params.maxPrice > 0:
         filtered = [o for o in filtered if o.price <= params.maxPrice]
 
-    # Stops filter, values like [0], [0, 1], [0, 1, 2], [2, 3] etc
+    # Stops filter, values like [0], [0, 1], [0, 1, 2], [2, 3] and so on
     if params.stopsFilter:
         allowed = set(params.stopsFilter)
         if 3 in allowed:
@@ -321,6 +301,8 @@ def search_business(params: SearchParams):
     - Generate all valid (departure, return) date pairs inside the window.
     - For each pair, call Duffel for a round trip (two slices).
     - Map to FlightOption, then apply price and stops filters.
+
+    No bookings are created, this is search only.
     """
 
     # If Duffel is not configured, fall back to dummy results
@@ -456,73 +438,6 @@ def admin_add_credits(
     }
 
 
-# ------------- Duffel test booking endpoint ------------- #
-
-@app.post("/duffel/create-test-order")
-def create_duffel_test_order(payload: CreateTestOrderRequest):
-    """
-    Creates a Duffel order in TEST mode only.
-    Uses DUFFEL_TEST_ACCESS_TOKEN, never live.
-    """
-
-    if duffel_test is None:
-        raise HTTPException(status_code=500, detail="Duffel test client not configured")
-
-    # Get the latest version of the offer from Duffel
-    try:
-        offer = duffel_test.offers.get(payload.offer_id)
-    except Exception as e:
-        print("Duffel get offer error:", e)
-        raise HTTPException(status_code=400, detail="Invalid offer id or Duffel error")
-
-    total_amount = offer.total_amount
-    total_currency = offer.total_currency
-
-    # Map passengers from your request to Duffel format
-    passengers_payload = []
-    for p in payload.passengers:
-        passenger_data = {
-            "id": p.id,
-            "phone_number": p.phone_number,
-            "email": p.email,
-            "born_on": p.born_on.isoformat(),
-            "title": p.title,
-            "gender": p.gender,
-            "family_name": p.family_name,
-            "given_name": p.given_name,
-        }
-        if p.infant_passenger_id:
-            passenger_data["infant_passenger_id"] = p.infant_passenger_id
-
-        passengers_payload.append(passenger_data)
-
-    # Create the order in Duffel TEST
-    try:
-        order = duffel_test.orders.create(
-            selected_offers=[payload.offer_id],
-            payments=[
-                {
-                    "type": "balance",
-                    "currency": total_currency,
-                    "amount": total_amount,
-                }
-            ],
-            passengers=passengers_payload,
-        )
-    except Exception as e:
-        print("Duffel create order error:", e)
-        raise HTTPException(status_code=500, detail="Failed to create order with Duffel")
-
-    booking_reference = getattr(order, "booking_reference", None)
-
-    return {
-        "status": "ok",
-        "environment": "test",
-        "order_id": order.id,
-        "booking_reference": booking_reference,
-    }
-
-
 # ------------- Duffel test endpoint ------------- #
 
 @app.get("/duffel-test")
@@ -535,6 +450,7 @@ def duffel_test(
     """
     Simple test endpoint for Duffel search.
     Uses whatever DUFFEL_ACCESS_TOKEN is configured (test or live).
+    No bookings are created.
     """
 
     if duffel is None:
