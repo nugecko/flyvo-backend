@@ -1,5 +1,4 @@
 import os
-import re
 from datetime import date, timedelta, datetime
 from typing import List, Optional
 
@@ -20,10 +19,11 @@ class SearchParams(BaseModel):
     latestDeparture: date
     minStayDays: int
     maxStayDays: int
+    # None means no price limit
     maxPrice: Optional[float] = None
     cabin: str = "BUSINESS"
     passengers: int = 1
-    # Optional filter for number of stops, for example [0] or [0,1,2]
+    # Optional filter for number of stops, for example [0] or [0, 1, 2]
     # 3 is treated as "3 or more stops"
     stopsFilter: Optional[List[int]] = None
 
@@ -44,12 +44,6 @@ class FlightOption(BaseModel):
 
     bookingUrl: Optional[str] = None
     url: Optional[str] = None
-
-    # Extra fields so the UI can show real details instead of TBD
-    originAirport: Optional[str] = None
-    destinationAirport: Optional[str] = None
-    departureTime: Optional[str] = None
-    arrivalTime: Optional[str] = None
 
 
 class CreditUpdateRequest(BaseModel):
@@ -74,56 +68,20 @@ app.add_middleware(
 )
 
 
-# ------------- Duffel client ------------- #
+# ------------- Duffel client and admin token ------------- #
 
-# Prefer DUFFEL_ACCESS_TOKEN but fall back to DUFFEL_TEST_ACCESS_TOKEN if present
-DUFFEL_ACCESS_TOKEN = os.getenv("DUFFEL_ACCESS_TOKEN") or os.getenv("DUFFEL_TEST_ACCESS_TOKEN")
+ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN")
+DUFFEL_ACCESS_TOKEN = os.getenv("DUFFEL_ACCESS_TOKEN")
+
 duffel = Duffel(access_token=DUFFEL_ACCESS_TOKEN) if DUFFEL_ACCESS_TOKEN else None
 
 
 # ------------- Helpers ------------- #
 
-# Map whatever the frontend sends into valid Duffel cabin values
-CABIN_MAP = {
-    "economy": "economy",
-    "eco": "economy",
-    "coach": "economy",
-    "business": "business",
-    "business class": "business",
-    "biz": "business",
-    "first": "first",
-    "first class": "first",
-    "premium economy": "premium_economy",
-    "premium_economy": "premium_economy",
-    "premium econom": "premium_economy",
-    "prem eco": "premium_economy",
-    "prem econ": "premium_economy",
-}
-
-
-def normalise_cabin(raw_cabin: str) -> str:
-    key = (raw_cabin or "").strip().lower()
-    return CABIN_MAP.get(key, "business")
-
-
-def parse_iso_duration_to_minutes(iso_duration: str) -> int:
-    if not iso_duration:
-        return 0
-    pattern = r"P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?"
-    match = re.match(pattern, iso_duration)
-    if not match:
-        return 0
-    days_str, hours_str, minutes_str = match.groups()
-    days = int(days_str) if days_str else 0
-    hours = int(hours_str) if hours_str else 0
-    minutes = int(minutes_str) if minutes_str else 0
-    return (days * 24 + hours) * 60 + minutes
-
-
-def generate_date_pairs(params: SearchParams, max_pairs: int = 60):
+def generate_date_pairs(params: SearchParams, max_pairs: int = 60) -> List[tuple[date, date]]:
     """
-    Generate departure and return date pairs based on user selected stay length.
-    No dummy logic, pure real date generation.
+    Generate (departure, return) pairs for all valid dates
+    inside the window, respecting minStayDays and maxStayDays.
     """
     pairs: List[tuple[date, date]] = []
 
@@ -131,6 +89,7 @@ def generate_date_pairs(params: SearchParams, max_pairs: int = 60):
     max_stay = max(min_stay, params.maxStayDays)
 
     stays = list(range(min_stay, max_stay + 1))
+
     current = params.earliestDeparture
 
     while current <= params.latestDeparture and len(pairs) < max_pairs:
@@ -145,72 +104,60 @@ def generate_date_pairs(params: SearchParams, max_pairs: int = 60):
     return pairs
 
 
-def map_duffel_offer_to_option(offer, dep: date, ret: date, index: int) -> FlightOption:
+def normalise_cabin(cabin: Optional[str]) -> Optional[str]:
+    if not cabin:
+        return None
+    c = cabin.strip().lower()
+    if c in ["business", "business_class"]:
+        return "business"
+    if c in ["economy", "coach"]:
+        return "economy"
+    if c in ["premium", "premium_economy", "premium economy"]:
+        return "premium_economy"
+    if c in ["first", "first_class"]:
+        return "first"
+    return None
+
+
+def map_duffel_offer_to_option(offer, dep: date, ret: date) -> FlightOption:
     """
-    Map a Duffel offer to the FlightOption model, including enough detail
-    for the frontend to show real airports and times.
+    Map a Duffel offer object to our FlightOption model.
     """
     price = float(offer.total_amount)
     currency = offer.total_currency
 
-    # Outbound slice is the first slice
     first_slice = offer.slices[0]
-    segments = first_slice.segments
-    stops = max(0, len(segments) - 1)
+    outbound_segments = first_slice.segments
+    stops_outbound = max(0, len(outbound_segments) - 1)
 
-    origin_airport = None
-    destination_airport = None
-    departure_time_str = None
-    arrival_time_str = None
     duration_minutes = 0
+    try:
+        first_segment = outbound_segments[0]
+        last_segment = outbound_segments[-1]
+        dep_dt = datetime.fromisoformat(first_segment.departing_at.replace("Z", "+00:00"))
+        arr_dt = datetime.fromisoformat(last_segment.arriving_at.replace("Z", "+00:00"))
+        duration_minutes = int((arr_dt - dep_dt).total_seconds() // 60)
+    except Exception:
+        duration_minutes = 0
 
-    if segments:
-        first_seg = segments[0]
-        last_seg = segments[-1]
-
-        try:
-            origin_airport = first_seg.origin.iata_code
-        except Exception:
-            origin_airport = None
-
-        try:
-            destination_airport = last_seg.destination.iata_code
-        except Exception:
-            destination_airport = None
-
-        departure_time_str = getattr(first_seg, "departing_at", None)
-        arrival_time_str = getattr(last_seg, "arriving_at", None)
-
-        if departure_time_str and arrival_time_str:
-            try:
-                dep_dt = datetime.fromisoformat(departure_time_str.replace("Z", "+00:00"))
-                arr_dt = datetime.fromisoformat(arrival_time_str.replace("Z", "+00:00"))
-                duration_minutes = int((arr_dt - dep_dt).total_seconds() // 60)
-            except Exception:
-                duration_minutes = 0
-
-    airline_code = offer.owner.iata_code
-    airline_name = AIRLINE_NAMES.get(airline_code, offer.owner.name)
+    airline_code = getattr(offer.owner, "iata_code", None)
+    airline_name = AIRLINE_NAMES.get(airline_code, getattr(offer.owner, "name", "Airline"))
     booking_url = AIRLINE_BOOKING_URLS.get(airline_code)
 
     return FlightOption(
         id=offer.id,
         airline=airline_name,
-        airlineCode=airline_code,
+        airlineCode=airline_code or None,
         price=price,
         currency=currency,
         departureDate=dep.isoformat(),
         returnDate=ret.isoformat(),
-        stops=stops,
+        stops=stops_outbound,
         durationMinutes=duration_minutes,
         totalDurationMinutes=duration_minutes,
         duration=None,
         bookingUrl=booking_url,
         url=booking_url,
-        originAirport=origin_airport,
-        destinationAirport=destination_airport,
-        departureTime=departure_time_str,
-        arrivalTime=arrival_time_str,
     )
 
 
@@ -234,7 +181,25 @@ def apply_filters(options: List[FlightOption], params: SearchParams) -> List[Fli
     return filtered
 
 
-# ------------- Routes ------------- #
+def offer_matches_cabin(offer, target_cabin: Optional[str]) -> bool:
+    """
+    Filter offers by cabin using the first outbound segment.
+    target_cabin should be already normalised, for example "business".
+    """
+    if not target_cabin:
+        return True
+
+    try:
+        first_segment = offer.slices[0].segments[0]
+        seg_cabin = getattr(first_segment, "cabin_class", None)
+        if not seg_cabin:
+            return True
+        return seg_cabin.lower() == target_cabin
+    except Exception:
+        return True
+
+
+# ------------- Routes: health and search ------------- #
 
 @app.get("/")
 def home():
@@ -249,89 +214,75 @@ def health():
 @app.post("/search-business")
 def search_business(params: SearchParams):
     """
-    Main search endpoint used by the Base44 frontend.
+    Main endpoint used by the Base44 frontend.
 
     Behaviour:
-    - Generate date pairs inside the window.
+    - Generate all valid (departure, return) date pairs inside the window.
     - For each pair, call Duffel for a round trip.
-    - Collect real offers only.
-    - If there are no offers, return status no_results.
+    - Map to FlightOption, apply price and stops filters.
+    - No dummy data: if Duffel has no offers, options will be an empty list.
     """
 
     if duffel is None:
-        return {
-            "status": "error",
-            "message": "Duffel not configured",
-            "options": [],
-        }
+        raise HTTPException(status_code=500, detail="Duffel not configured")
 
-    try:
-        all_options: List[FlightOption] = []
+    date_pairs = generate_date_pairs(params, max_pairs=60)
+    if not date_pairs:
+        raise HTTPException(status_code=400, detail="No valid date pairs inside this window")
 
-        date_pairs = generate_date_pairs(params, max_pairs=60)
+    target_cabin = normalise_cabin(params.cabin)
 
-        if not date_pairs:
-            return {
-                "status": "no_results",
-                "message": "No valid date combinations",
-                "options": [],
-            }
+    collected: List[FlightOption] = []
 
-        cabin_value = normalise_cabin(params.cabin)
+    for dep, ret in date_pairs:
+        slices = [
+            {
+                "origin": params.origin,
+                "destination": params.destination,
+                "departure_date": dep.isoformat(),
+            },
+            {
+                "origin": params.destination,
+                "destination": params.origin,
+                "departure_date": ret.isoformat(),
+            },
+        ]
+        pax = [{"type": "adult"} for _ in range(params.passengers)]
 
-        for dep, ret in date_pairs:
-            body = {
-                "slices": [
-                    {
-                        "origin": params.origin,
-                        "destination": params.destination,
-                        "departure_date": dep.isoformat(),
-                    },
-                    {
-                        "origin": params.destination,
-                        "destination": params.origin,
-                        "departure_date": ret.isoformat(),
-                    },
-                ],
-                "passengers": [{"type": "adult"} for _ in range(params.passengers)],
-                "cabin_class": cabin_value,
-            }
+        try:
+            builder = (
+                duffel.offer_requests.create()
+                .passengers(pax)
+                .slices(slices)
+                .return_offers()
+            )
+            offer_request = builder.execute()
+            offers = getattr(offer_request, "offers", [])
 
-            try:
-                offer_request = duffel.offer_requests.create(body)
-                offers_iter = duffel.offers.list(offer_request_id=offer_request.id)
+            for offer in offers:
+                if not offer_matches_cabin(offer, target_cabin):
+                    continue
+                collected.append(map_duffel_offer_to_option(offer, dep, ret))
 
-                for idx, offer in enumerate(offers_iter):
-                    all_options.append(
-                        map_duffel_offer_to_option(offer, dep, ret, idx)
-                    )
+        except Exception as e:
+            print("Duffel error for", dep, "to", ret, ":", repr(e))
+            continue
 
-            except Exception as e:
-                print("Duffel error for", dep, ret, ":", repr(e))
-                continue
-
-        if not all_options:
-            return {
-                "status": "no_results",
-                "message": "No flights found",
-                "options": [],
-            }
-
-        filtered = apply_filters(all_options, params)
-
+    if not collected:
+        # No dummy fallback, just no options
         return {
             "status": "ok",
             "source": "duffel",
-            "options": [o.dict() for o in filtered],
-        }
-
-    except Exception as e:
-        print("Unexpected Duffel search error:", repr(e))
-        return {
-            "status": "error",
-            "message": "Unexpected backend error",
             "options": [],
         }
+
+    filtered = apply_filters(collected, params)
+
+    return {
+        "status": "ok",
+        "source": "duffel",
+        "options": [o.dict() for o in filtered],
+    }
 
 
 # ------------- Admin credits endpoint ------------- #
@@ -344,8 +295,11 @@ def admin_add_credits(
     payload: CreditUpdateRequest,
     x_admin_token: str = Header(None, alias="X-Admin-Token"),
 ):
+    print("DEBUG_received_token:", repr(x_admin_token))
+    print("DEBUG_expected_token:", repr(ADMIN_API_TOKEN))
+
     received = (x_admin_token or "").strip()
-    expected = (os.getenv("ADMIN_API_TOKEN") or "").strip()
+    expected = (ADMIN_API_TOKEN or "").strip()
 
     if received.lower().startswith("bearer "):
         received = received[7:].strip()
@@ -369,14 +323,17 @@ def admin_add_credits(
     if change_amount is None:
         raise HTTPException(
             status_code=400,
-            detail="Missing credit amount. Use amount, delta, creditAmount, or value.",
+            detail="Missing credit amount. Expected one of: amount, delta, creditAmount, value.",
         )
 
     current = USER_WALLETS.get(payload.userId, 0)
     new_balance = max(0, current + change_amount)
     USER_WALLETS[payload.userId] = new_balance
 
-    return {"userId": payload.userId, "newBalance": new_balance}
+    return {
+        "userId": payload.userId,
+        "newBalance": new_balance,
+    }
 
 
 # ------------- Duffel test endpoint ------------- #
@@ -389,41 +346,50 @@ def duffel_test(
     passengers: int = 1,
 ):
     """
-    Simple single slice Duffel search for debugging.
-    Does not create any bookings.
+    Simple test endpoint for Duffel search.
+    Uses whatever DUFFEL_ACCESS_TOKEN is configured.
+    No bookings are created.
     """
 
     if duffel is None:
-        return {"status": "error", "message": "Duffel not configured"}
+        raise HTTPException(status_code=500, detail="Duffel not configured")
 
-    body = {
-        "slices": [{
+    slices = [
+        {
             "origin": origin,
             "destination": destination,
             "departure_date": departure.isoformat(),
-        }],
-        "passengers": [{"type": "adult"} for _ in range(passengers)],
-        "cabin_class": "business",
-    }
+        }
+    ]
+    pax = [{"type": "adult"} for _ in range(passengers)]
 
     try:
-        offer_request = duffel.offer_requests.create(body)
-        offers_iter = duffel.offers.list(offer_request_id=offer_request.id)
-    except Exception as e:
-        print("Duffel error in /duffel-test:", repr(e))
-        raise HTTPException(
-            status_code=500,
-            detail=f"Duffel API error: {e}",
+        builder = (
+            duffel.offer_requests.create()
+            .passengers(pax)
+            .slices(slices)
+            .return_offers()
         )
+        offer_request = builder.execute()
+        offers = getattr(offer_request, "offers", [])
+    except Exception as e:
+        print("Duffel error:", repr(e))
+        raise HTTPException(status_code=500, detail=f"Duffel API error: {e}")
 
     results = []
-    for offer in offers_iter:
-        results.append({
-            "id": offer.id,
-            "airline": offer.owner.name,
-            "airlineCode": offer.owner.iata_code,
-            "price": float(offer.total_amount),
-            "currency": offer.total_currency,
-        })
+    for offer in offers:
+        results.append(
+            {
+                "id": offer.id,
+                "airline": offer.owner.name,
+                "airlineCode": offer.owner.iata_code,
+                "price": float(offer.total_amount),
+                "currency": offer.total_currency,
+            }
+        )
 
-    return {"status": "ok", "source": "duffel", "offers": results}
+    return {
+        "status": "ok",
+        "source": "duffel",
+        "offers": results,
+    }
