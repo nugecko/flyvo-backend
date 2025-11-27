@@ -1,13 +1,12 @@
 import os
 from datetime import date, datetime, timedelta
 from enum import Enum
-from typing import List, Optional, Tuple, Dict
-from uuid import uuid4
+from typing import List, Optional, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
-from fastapi.middleware.cors import CORSMIDDLEWARE
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from airlines import AIRLINE_NAMES, AIRLINE_BOOKING_URLS
@@ -58,6 +57,9 @@ class FlightOption(BaseModel):
     destination: Optional[str] = None         # destination IATA code
     originAirport: Optional[str] = None       # full origin airport name
     destinationAirport: Optional[str] = None  # full destination airport name
+
+    # Detailed segment info for stopover display
+    segments: Optional[List[Dict[str, Any]]] = None
 
     bookingUrl: Optional[str] = None
     url: Optional[str] = None
@@ -144,9 +146,6 @@ MAX_DATE_PAIRS_HARD = 60
 
 # Below this number of date pairs, we run synchronously
 SYNC_PAIR_THRESHOLD = 10
-
-# Max concurrent Duffel calls in async job
-MAX_PARALLEL_DUFFEL_CALLS = 5
 
 
 # ------------- In memory stores ------------- #
@@ -315,6 +314,22 @@ def map_duffel_offer_to_option(
 
     iso_duration = build_iso_duration(duration_minutes)
 
+    # Build segments list for stopover display
+    segments_info: List[Dict[str, Any]] = []
+    for seg in outbound_segments:
+        o = seg.get("origin", {}) or {}
+        d = seg.get("destination", {}) or {}
+        segments_info.append(
+            {
+                "origin": o.get("iata_code"),
+                "originAirport": o.get("name"),
+                "destination": d.get("iata_code"),
+                "destinationAirport": d.get("name"),
+                "departingAt": seg.get("departing_at"),
+                "arrivingAt": seg.get("arriving_at"),
+            }
+        )
+
     return FlightOption(
         id=offer.get("id", ""),
         airline=airline_name,
@@ -331,6 +346,7 @@ def map_duffel_offer_to_option(
         destination=destination_code,
         originAirport=origin_airport,
         destinationAirport=destination_airport,
+        segments=segments_info or None,
         bookingUrl=booking_url,
         url=booking_url,
     )
@@ -444,53 +460,39 @@ def run_duffel_scan(params: SearchParams) -> List[FlightOption]:
     return balanced
 
 
-# ------------- Async job runner (parallel Duffel) ------------- #
+# ------------- Parallel helper for async job ------------- #
 
-def _fetch_offers_for_pair(
-    origin: str,
-    destination: str,
-    dep: date,
-    ret: date,
-    passengers: int,
-    cabin: str,
-    per_pair_limit: int,
-) -> List[Tuple[dict, date, date]]:
+def fetch_offers_for_pair(dep: date, ret: date, params: SearchParams, max_offers_pair: int) -> List[Tuple[dict, date, date]]:
     """
-    Worker function to fetch offers for a single (dep, ret) pair.
-    Runs in a thread, returns list of (offer_json, dep, ret).
+    Helper for parallel execution.
+    Fetches offers for a single (departure, return) pair and returns
+    a list of (offer_json, dep, ret).
     """
     slices = [
-        {"origin": origin, "destination": destination, "departure_date": dep.isoformat()},
-        {"origin": destination, "destination": origin, "departure_date": ret.isoformat()},
+        {"origin": params.origin, "destination": params.destination, "departure_date": dep.isoformat()},
+        {"origin": params.destination, "destination": params.origin, "departure_date": ret.isoformat()},
     ]
-    pax = [{"type": "adult"} for _ in range(passengers)]
-
-    offers_for_pair: List[Tuple[dict, date, date]] = []
+    pax = [{"type": "adult"} for _ in range(params.passengers)]
 
     try:
-        offer_request = duffel_create_offer_request(slices, pax, cabin)
+        offer_request = duffel_create_offer_request(slices, pax, params.cabin)
         offer_request_id = offer_request.get("id")
         if not offer_request_id:
             return []
 
-        offers_json = duffel_list_offers(offer_request_id, limit=per_pair_limit)
+        offers_json = duffel_list_offers(offer_request_id, limit=max_offers_pair)
+        return [(offer, dep, ret) for offer in offers_json]
     except Exception as e:
-        print("Duffel error in worker for", dep, "to", ret, ":", e)
+        print("Duffel error in parallel pair", dep, "to", ret, ":", e)
         return []
 
-    for offer in offers_json:
-        offers_for_pair.append((offer, dep, ret))
 
-    return offers_for_pair
-
+# ------------- Async job runner ------------- #
 
 def run_search_job(job_id: str):
     """
     Background job that performs the full Duffel scan and updates progress.
-
-    This version uses a small thread pool so that several Duffel
-    calls can run in parallel, significantly reducing total runtime
-    for large windows, while keeping the public API the same.
+    Uses a small thread pool so several date pairs are scanned in parallel.
     """
     job = JOBS.get(job_id)
     if not job:
@@ -507,61 +509,33 @@ def run_search_job(job_id: str):
         job.total_pairs = total_pairs
         JOBS[job_id] = job
 
-        if not pairs:
-            JOB_RESULTS[job_id] = []
-            job.status = JobStatus.COMPLETED
-            job.updated_at = datetime.utcnow()
-            JOBS[job_id] = job
-            return
-
         collected_offers: List[Tuple[dict, date, date]] = []
         total_count = 0
 
-        # Submit work to a small thread pool
-        with ThreadPoolExecutor(max_workers=MAX_PARALLEL_DUFFEL_CALLS) as executor:
-            future_to_index: Dict = {}
-            for index, (dep, ret) in enumerate(pairs):
-                if total_count >= max_offers_total:
-                    break
+        # Parallel Duffel calls with 5 workers
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {
+                executor.submit(fetch_offers_for_pair, dep, ret, job.params, max_offers_pair): (dep, ret)
+                for dep, ret in pairs
+            }
 
-                per_pair_limit = min(max_offers_pair, max_offers_total - total_count)
-                future = executor.submit(
-                    _fetch_offers_for_pair,
-                    job.params.origin,
-                    job.params.destination,
-                    dep,
-                    ret,
-                    job.params.passengers,
-                    job.params.cabin,
-                    per_pair_limit,
-                )
-                future_to_index[future] = index
-
-            # As each future completes, update progress and collect offers
-            completed_pairs = 0
-            for future in as_completed(future_to_index):
-                index = future_to_index[future]
-                completed_pairs += 1
-
-                job.processed_pairs = min(completed_pairs, total_pairs)
+            processed = 0
+            for future in as_completed(futures):
+                processed += 1
+                job.processed_pairs = processed
                 job.updated_at = datetime.utcnow()
                 JOBS[job_id] = job
 
-                if total_count >= max_offers_total:
-                    # We already have enough offers, ignore remaining futures
-                    continue
+                pair_offers = future.result() or []
 
-                try:
-                    offers_for_pair = future.result()
-                except Exception as e:
-                    print("Duffel error in background job:", e)
-                    continue
-
-                for offer, dep, ret in offers_for_pair:
-                    collected_offers.append((offer, dep, ret))
-                    total_count += 1
+                for offer, dep, ret in pair_offers:
                     if total_count >= max_offers_total:
                         break
+                    collected_offers.append((offer, dep, ret))
+                    total_count += 1
+
+                if total_count >= max_offers_total:
+                    break
 
         mapped: List[FlightOption] = [
             map_duffel_offer_to_option(offer, dep, ret)
@@ -597,6 +571,9 @@ def health():
 
 
 # ------------- Routes: main search (sync + async) ------------- #
+
+from uuid import uuid4  # keep import close to usage to avoid clutter
+
 
 @app.post("/search-business")
 def search_business(params: SearchParams, background_tasks: BackgroundTasks):
