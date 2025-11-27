@@ -58,6 +58,10 @@ class FlightOption(BaseModel):
     originAirport: Optional[str] = None       # full origin airport name
     destinationAirport: Optional[str] = None  # full destination airport name
 
+    # Stopover info for display
+    stopoverCodes: Optional[List[str]] = None
+    stopoverAirports: Optional[List[str]] = None
+
     # Detailed segment info for stopover display
     segments: Optional[List[Dict[str, Any]]] = None
 
@@ -314,7 +318,20 @@ def map_duffel_offer_to_option(
 
     iso_duration = build_iso_duration(duration_minutes)
 
-    # Build segments list for stopover display
+    # Stopover codes and airports
+    stopover_codes: List[str] = []
+    stopover_airports: List[str] = []
+    if len(outbound_segments) > 1:
+        for seg in outbound_segments[:-1]:
+            dest_obj = seg.get("destination", {}) or {}
+            code = dest_obj.get("iata_code")
+            name = dest_obj.get("name")
+            if code:
+                stopover_codes.append(code)
+            if name:
+                stopover_airports.append(name)
+
+    # Build segments list for detailed display
     segments_info: List[Dict[str, Any]] = []
     for seg in outbound_segments:
         o = seg.get("origin", {}) or {}
@@ -346,6 +363,8 @@ def map_duffel_offer_to_option(
         destination=destination_code,
         originAirport=origin_airport,
         destinationAirport=destination_airport,
+        stopoverCodes=stopover_codes or None,
+        stopoverAirports=stopover_airports or None,
         segments=segments_info or None,
         bookingUrl=booking_url,
         url=booking_url,
