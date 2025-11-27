@@ -1,6 +1,7 @@
 import os
+import time
 from datetime import date, datetime, timedelta
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 import requests
 from fastapi import FastAPI, Header, HTTPException
@@ -23,11 +24,11 @@ class SearchParams(BaseModel):
     maxPrice: Optional[float] = None
     cabin: str = "BUSINESS"
     passengers: int = 1
-    # Optional filter for number of stops, for example [0, 1, 2]
+    # Optional filter for number of stops, for example [0] or [0, 1, 2]
     # 3 is treated as "3 or more stops"
     stopsFilter: Optional[List[int]] = None
 
-    # Optional tuning parameters from the Admin Search Tuning tab
+    # Tuning values coming from Base44 "Search Tuning" screen
     maxOffersPerPair: Optional[int] = None
     maxOffersTotal: Optional[int] = None
     maxDatePairs: Optional[int] = None
@@ -47,7 +48,7 @@ class FlightOption(BaseModel):
     totalDurationMinutes: Optional[int] = None
     duration: Optional[str] = None
 
-    # For Base44 filtering
+    # Fields for Base44 filtering
     origin: Optional[str] = None              # origin IATA code, for example LHR
     destination: Optional[str] = None         # destination IATA code, for example TLV
     originAirport: Optional[str] = None       # full origin airport name
@@ -92,6 +93,28 @@ if not DUFFEL_ACCESS_TOKEN:
     print("WARNING: DUFFEL_ACCESS_TOKEN is not set, searches will fail")
 
 
+# ------------- Limits and tuning defaults ------------- #
+
+# Reasonable defaults if Base44 does not send tuning values
+DEFAULT_MAX_OFFERS_PER_PAIR = 50
+DEFAULT_MAX_OFFERS_TOTAL = 5000
+DEFAULT_MAX_DATE_PAIRS = 20
+
+# Hard safety caps so nobody can overload the server
+HARD_CAP_OFFERS_PER_PAIR = 100
+HARD_CAP_OFFERS_TOTAL = 8000
+HARD_CAP_DATE_PAIRS = 60
+
+# Per airline fairness cap
+MAX_RESULTS_PER_AIRLINE = 80
+
+# Wall clock hard limit for a search
+MAX_SEARCH_SECONDS = 25.0
+
+# Duffel HTTP timeouts per request
+DUFFEL_TIMEOUT_SECONDS = 10.0
+
+
 # ------------- Helpers ------------- #
 
 def duffel_headers() -> dict:
@@ -103,21 +126,18 @@ def duffel_headers() -> dict:
     }
 
 
-def generate_date_pairs(params: SearchParams, max_pairs: int = 30) -> List[Tuple[date, date]]:
+def generate_date_pairs(params: SearchParams, max_pairs: int) -> List[Tuple[date, date]]:
     """
     Generate (departure, return) pairs across the window,
-    respecting minStayDays and maxStayDays.
-    max_pairs is a hard cap that protects performance and API usage.
+    respecting minStayDays and maxStayDays, then clamp to max_pairs.
     """
     pairs: List[Tuple[date, date]] = []
 
     min_stay = max(1, params.minStayDays)
     max_stay = max(min_stay, params.maxStayDays)
-    stays = list(range(min_stay, max_stay + 1))
 
-    today = date.today()
-    # Never search in the past
-    current = max(params.earliestDeparture, today)
+    stays = list(range(min_stay, max_stay + 1))
+    current = params.earliestDeparture
 
     while current <= params.latestDeparture and len(pairs) < max_pairs:
         for stay in stays:
@@ -128,7 +148,7 @@ def generate_date_pairs(params: SearchParams, max_pairs: int = 30) -> List[Tuple
                     break
         current += timedelta(days=1)
 
-    return pairs
+    return pairs[:max_pairs]
 
 
 def duffel_create_offer_request(
@@ -151,7 +171,12 @@ def duffel_create_offer_request(
         }
     }
 
-    resp = requests.post(url, json=payload, headers=duffel_headers(), timeout=30)
+    resp = requests.post(
+        url,
+        json=payload,
+        headers=duffel_headers(),
+        timeout=DUFFEL_TIMEOUT_SECONDS,
+    )
     if resp.status_code >= 400:
         print("Duffel offer_requests error:", resp.status_code, resp.text)
         raise HTTPException(status_code=502, detail="Duffel API error")
@@ -160,7 +185,7 @@ def duffel_create_offer_request(
     return body.get("data", {})
 
 
-def duffel_list_offers(offer_request_id: str, limit: int = 300) -> List[dict]:
+def duffel_list_offers(offer_request_id: str, limit: int) -> List[dict]:
     """
     List offers for a given offer request.
     Simple one page fetch, then truncate to limit.
@@ -172,7 +197,12 @@ def duffel_list_offers(offer_request_id: str, limit: int = 300) -> List[dict]:
         "sort": "total_amount",
     }
 
-    resp = requests.get(url, params=params, headers=duffel_headers(), timeout=30)
+    resp = requests.get(
+        url,
+        params=params,
+        headers=duffel_headers(),
+        timeout=DUFFEL_TIMEOUT_SECONDS,
+    )
     if resp.status_code >= 400:
         print("Duffel offers error:", resp.status_code, resp.text)
         raise HTTPException(status_code=502, detail="Duffel API error")
@@ -293,32 +323,32 @@ def apply_filters(options: List[FlightOption], params: SearchParams) -> List[Fli
     return filtered
 
 
-def limit_per_airline(
-    options: List[FlightOption],
-    max_per_airline: int = 50,
-    min_airlines_for_limit: int = 4,
-) -> List[FlightOption]:
+def limit_by_airline(options: List[FlightOption],
+                     max_per_airline: int,
+                     max_total: int) -> List[FlightOption]:
     """
-    Limit the number of results per airline while keeping price order.
+    Ensure no single airline dominates the list.
 
-    If there are fewer than min_airlines_for_limit distinct airlines,
-    the list is returned unchanged.
+    Strategy:
+    - Group by airline code (or name if missing)
+    - Keep at most max_per_airline cheapest options per airline
+    - Merge all buckets and sort by price
+    - Return up to max_total overall
     """
-    airline_keys = {o.airlineCode or o.airline for o in options}
-    if len(airline_keys) < min_airlines_for_limit:
-        return options
-
-    counts: dict[str, int] = {}
-    balanced: List[FlightOption] = []
+    buckets: Dict[str, List[FlightOption]] = {}
 
     for opt in options:
         key = opt.airlineCode or opt.airline
-        current = counts.get(key, 0)
-        if current < max_per_airline:
-            balanced.append(opt)
-            counts[key] = current + 1
+        buckets.setdefault(key, []).append(opt)
 
-    return balanced
+    trimmed: List[FlightOption] = []
+    for key, bucket in buckets.items():
+        # bucket is already roughly price sorted, but sort to be sure
+        bucket_sorted = sorted(bucket, key=lambda o: o.price)
+        trimmed.extend(bucket_sorted[:max_per_airline])
+
+    trimmed.sort(key=lambda o: o.price)
+    return trimmed[:max_total]
 
 
 # ------------- Routes: health and search ------------- #
@@ -339,11 +369,14 @@ def search_business(params: SearchParams):
     Main endpoint used by the Base44 frontend.
 
     Behaviour:
-    - Generate all valid (departure, return) date pairs across the window.
-    - For each pair, call Duffel for a round trip (two slices).
+    - Generate valid (departure, return) date pairs across the window.
+    - Clamp by maxDatePairs and a global time limit.
+    - For each pair, call Duffel for a round trip.
     - Limit offers per date pair and overall to protect the server.
-    - Map to FlightOption, then apply price, stops and per airline filters.
+    - Apply price and stops filters.
+    - Enforce a per airline cap so no airline dominates.
     """
+
     if not DUFFEL_ACCESS_TOKEN:
         return {
             "status": "error",
@@ -351,18 +384,18 @@ def search_business(params: SearchParams):
             "options": [],
         }
 
-    started_at = datetime.utcnow()
+    # Resolve tuning values with safety caps
+    max_offers_per_pair = params.maxOffersPerPair or DEFAULT_MAX_OFFERS_PER_PAIR
+    max_offers_per_pair = max(1, min(max_offers_per_pair, HARD_CAP_OFFERS_PER_PAIR))
 
-    # Limits from tuning tab, clamped to safe values
-    client_max_pairs = params.maxDatePairs or 20
-    client_max_offers_per_pair = params.maxOffersPerPair or 50
-    client_max_offers_total = params.maxOffersTotal or 5000
+    max_offers_total = params.maxOffersTotal or DEFAULT_MAX_OFFERS_TOTAL
+    max_offers_total = max(1, min(max_offers_total, HARD_CAP_OFFERS_TOTAL))
 
-    MAX_DATE_PAIRS = max(5, min(client_max_pairs, 60))
-    MAX_OFFERS_PER_PAIR = max(10, min(client_max_offers_per_pair, 200))
-    MAX_OFFERS_TOTAL = max(500, min(client_max_offers_total, 5000))
+    max_date_pairs = params.maxDatePairs or DEFAULT_MAX_DATE_PAIRS
+    max_date_pairs = max(1, min(max_date_pairs, HARD_CAP_DATE_PAIRS))
 
-    date_pairs = generate_date_pairs(params, max_pairs=MAX_DATE_PAIRS)
+    # Generate date pairs within the cap
+    date_pairs = generate_date_pairs(params, max_pairs=max_date_pairs)
     if not date_pairs:
         return {
             "status": "ok",
@@ -373,8 +406,15 @@ def search_business(params: SearchParams):
     collected_offers: List[Tuple[dict, date, date]] = []
     total_count = 0
 
+    start_time = time.time()
+
     for dep, ret in date_pairs:
-        if total_count >= MAX_OFFERS_TOTAL:
+        # Global time guard to avoid browser timeouts
+        if time.time() - start_time > MAX_SEARCH_SECONDS:
+            print("Stopping search early due to time limit")
+            break
+
+        if total_count >= max_offers_total:
             break
 
         slices = [
@@ -397,7 +437,7 @@ def search_business(params: SearchParams):
             if not offer_request_id:
                 continue
 
-            per_pair_limit = min(MAX_OFFERS_PER_PAIR, MAX_OFFERS_TOTAL - total_count)
+            per_pair_limit = min(max_offers_per_pair, max_offers_total - total_count)
             offers_json = duffel_list_offers(offer_request_id, limit=per_pair_limit)
         except HTTPException as e:
             print("Duffel error for", dep, "to", ret, ":", e.detail)
@@ -409,16 +449,10 @@ def search_business(params: SearchParams):
         for offer in offers_json:
             collected_offers.append((offer, dep, ret))
             total_count += 1
-            if total_count >= MAX_OFFERS_TOTAL:
+            if total_count >= max_offers_total:
                 break
 
     if not collected_offers:
-        duration = (datetime.utcnow() - started_at).total_seconds()
-        print(
-            f"search_business took {duration:.1f}s, "
-            f"pairs={len(date_pairs)}, offers_collected=0, filtered=0, "
-            f"balanced=0, source=duffel_no_results"
-        )
         return {
             "status": "ok",
             "source": "duffel_no_results",
@@ -432,29 +466,20 @@ def search_business(params: SearchParams):
 
     filtered = apply_filters(mapped, params)
 
-    # Per airline balancing: only kicks in when there are at least 4 airlines
-    balanced = limit_per_airline(filtered, max_per_airline=50, min_airlines_for_limit=4)
-
-    duration = (datetime.utcnow() - started_at).total_seconds()
-    print(
-        f"search_business took {duration:.1f}s, "
-        f"pairs={len(date_pairs)}, offers_collected={len(collected_offers)}, "
-        f"filtered={len(filtered)}, balanced={len(balanced)}, "
-        f"max_pairs={MAX_DATE_PAIRS}, "
-        f"max_offers_per_pair={MAX_OFFERS_PER_PAIR}, "
-        f"max_offers_total={MAX_OFFERS_TOTAL}"
-    )
+    # Fairness per airline
+    max_results_total = min(max_offers_total, HARD_CAP_OFFERS_TOTAL)
+    limited = limit_by_airline(filtered, MAX_RESULTS_PER_AIRLINE, max_results_total)
 
     return {
         "status": "ok",
         "source": "duffel",
-        "options": [o.dict() for o in balanced],
+        "options": [o.dict() for o in limited],
     }
 
 
 # ------------- Admin credits endpoint ------------- #
 
-USER_WALLETS: dict[str, int] = {}
+USER_WALLETS: Dict[str, int] = {}
 
 
 @app.post("/admin/add-credits")
@@ -514,9 +539,10 @@ def duffel_test(
 ):
     """
     Simple test endpoint for Duffel search.
-    Uses whatever DUFFEL_ACCESS_TOKEN is configured.
+    Uses whatever DUFFEL_ACCESS_TOKEN is configured (test or live).
     No bookings are created.
     """
+
     if not DUFFEL_ACCESS_TOKEN:
         raise HTTPException(status_code=500, detail="Duffel not configured")
 
