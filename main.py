@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from airlines import AIRLINE_NAMES, AIRLINE_BOOKING_URLS
 
@@ -106,7 +106,7 @@ class SearchStatusResponse(BaseModel):
     progress: float
     error: Optional[str] = None
     previewCount: int = 0
-    previewOptions: List[FlightOption] = []
+    previewOptions: List[FlightOption] = Field(default_factory=list)
 
 
 class SearchResultsResponse(BaseModel):
