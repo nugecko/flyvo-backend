@@ -303,13 +303,17 @@ def map_duffel_offer_to_option(
     booking_url = AIRLINE_BOOKING_URL.get(airline_code) if isinstance(AIRLINE_BOOKING_URL, dict) else None
 
     slices = offer.get("slices", []) or []
-    outbound_segments = []
-    if slices:
+    outbound_segments: List[dict] = []
+    return_segments: List[dict] = []
+
+    if len(slices) >= 1:
         outbound_segments = slices[0].get("segments", []) or []
+    if len(slices) >= 2:
+        return_segments = slices[1].get("segments", []) or []
 
     stops_outbound = max(0, len(outbound_segments) - 1)
 
-    # Duration and airport info
+    # Duration and airport info, still based on the outbound slice
     duration_minutes = 0
     origin_code = None
     destination_code = None
@@ -340,7 +344,7 @@ def map_duffel_offer_to_option(
 
     iso_duration = build_iso_duration(duration_minutes)
 
-    # Stopover codes and airports
+    # Stopover codes and airports for summary, still outbound only
     stopover_codes: List[str] = []
     stopover_airports: List[str] = []
     if len(outbound_segments) > 1:
@@ -353,49 +357,52 @@ def map_duffel_offer_to_option(
             if name:
                 stopover_airports.append(name)
 
-    # Build segments list for detailed display, including aircraft and layover minutes
+    # Build segments list for detailed display, including both outbound and return,
+    # plus aircraft and layover minutes
     segments_info: List[Dict[str, Any]] = []
     aircraft_codes: List[str] = []
     aircraft_names: List[str] = []
 
-    for idx, seg in enumerate(outbound_segments):
-        o = seg.get("origin", {}) or {}
-        d = seg.get("destination", {}) or {}
-        aircraft = seg.get("aircraft", {}) or {}
+    for direction, seg_list in (("outbound", outbound_segments), ("return", return_segments)):
+        for idx, seg in enumerate(seg_list):
+            o = seg.get("origin", {}) or {}
+            d = seg.get("destination", {}) or {}
+            aircraft = seg.get("aircraft", {}) or {}
 
-        aircraft_code = aircraft.get("iata_code")
-        aircraft_name = aircraft.get("name")
+            aircraft_code = aircraft.get("iata_code")
+            aircraft_name = aircraft.get("name")
 
-        if aircraft_code:
-            aircraft_codes.append(aircraft_code)
-        if aircraft_name:
-            aircraft_names.append(aircraft_name)
+            if aircraft_code:
+                aircraft_codes.append(aircraft_code)
+            if aircraft_name:
+                aircraft_names.append(aircraft_name)
 
-        # Compute layover until the next segment, only for intermediate stops
-        layover_minutes_to_next: Optional[int] = None
-        if idx < len(outbound_segments) - 1:
-            this_arr = seg.get("arriving_at")
-            next_dep = outbound_segments[idx + 1].get("departing_at")
-            try:
-                this_arr_dt = datetime.fromisoformat(this_arr.replace("Z", "+00:00"))
-                next_dep_dt = datetime.fromisoformat(next_dep.replace("Z", "+00:00"))
-                layover_minutes_to_next = int((next_dep_dt - this_arr_dt).total_seconds() // 60)
-            except Exception:
-                layover_minutes_to_next = None
+            # Compute layover until the next segment within this slice
+            layover_minutes_to_next: Optional[int] = None
+            if idx < len(seg_list) - 1:
+                this_arr = seg.get("arriving_at")
+                next_dep = seg_list[idx + 1].get("departing_at")
+                try:
+                    this_arr_dt = datetime.fromisoformat(this_arr.replace("Z", "+00:00"))
+                    next_dep_dt = datetime.fromisoformat(next_dep.replace("Z", "+00:00"))
+                    layover_minutes_to_next = int((next_dep_dt - this_arr_dt).total_seconds() // 60)
+                except Exception:
+                    layover_minutes_to_next = None
 
-        segments_info.append(
-            {
-                "origin": o.get("iata_code"),
-                "originAirport": o.get("name"),
-                "destination": d.get("iata_code"),
-                "destinationAirport": d.get("name"),
-                "departingAt": seg.get("departing_at"),
-                "arrivingAt": seg.get("arriving_at"),
-                "aircraftCode": aircraft_code,
-                "aircraftName": aircraft_name,
-                "layoverMinutesToNext": layover_minutes_to_next,
-            }
-        )
+            segments_info.append(
+                {
+                    "direction": direction,  # "outbound" or "return"
+                    "origin": o.get("iata_code"),
+                    "originAirport": o.get("name"),
+                    "destination": d.get("iata_code"),
+                    "destinationAirport": d.get("name"),
+                    "departingAt": seg.get("departing_at"),
+                    "arrivingAt": seg.get("arriving_at"),
+                    "aircraftCode": aircraft_code,
+                    "aircraftName": aircraft_name,
+                    "layoverMinutesToNext": layover_minutes_to_next,
+                }
+            )
 
     return FlightOption(
         id=offer.get("id", ""),
