@@ -2,6 +2,7 @@ import os
 from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import List, Optional, Tuple, Dict, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
@@ -183,6 +184,9 @@ MAX_DATE_PAIRS_HARD = 20           # total date pairs scanned per job
 
 # Below this number of date pairs, we run synchronously
 SYNC_PAIR_THRESHOLD = 10
+
+# How many date pairs to process in parallel inside async jobs
+PARALLEL_WORKERS = 2
 
 # ===== END SECTION: ENV AND DUFFEL CONFIG =====
 
@@ -596,15 +600,60 @@ def run_duffel_scan(params: SearchParams) -> List[FlightOption]:
 # SECTION: ASYNC JOB RUNNER
 # =======================================
 
+def process_date_pair_offers(
+    params: SearchParams,
+    dep: date,
+    ret: date,
+    max_offers_pair: int,
+) -> List[FlightOption]:
+    """
+    Helper for async job runner.
+    Performs Duffel calls for a single date pair and maps results to FlightOption objects.
+    """
+    slices = [
+        {
+            "origin": params.origin,
+            "destination": params.destination,
+            "departure_date": dep.isoformat(),
+        },
+        {
+            "origin": params.destination,
+            "destination": params.origin,
+            "departure_date": ret.isoformat(),
+        },
+    ]
+    pax = [{"type": "adult"} for _ in range(params.passengers)]
+
+    try:
+        offer_request = duffel_create_offer_request(slices, pax, params.cabin)
+        offer_request_id = offer_request.get("id")
+        if not offer_request_id:
+            print(f"[PAIR {dep} -> {ret}] No offer_request id")
+            return []
+
+        offers_json = duffel_list_offers(offer_request_id, limit=max_offers_pair)
+    except HTTPException as e:
+        print(f"[PAIR {dep} -> {ret}] Duffel HTTPException: {e.detail}")
+        return []
+    except Exception as e:
+        print(f"[PAIR {dep} -> {ret}] Unexpected Duffel error: {e}")
+        return []
+
+    batch_mapped: List[FlightOption] = [
+        map_duffel_offer_to_option(offer, dep, ret) for offer in offers_json
+    ]
+    return batch_mapped
+
+
 def run_search_job(job_id: str):
     """
     Background job that performs the Duffel scan and updates progress.
 
     This version:
-    - Processes date pairs sequentially
-    - Updates processed_pairs as it goes
-    - Appends mapped FlightOption results incrementally into JOB_RESULTS[job_id]
-      so that /search-status and /search-results can return partial data
+    - Processes date pairs in parallel batches inside a ThreadPoolExecutor
+    - Updates processed_pairs as each pair completes
+    - Maintains JOB_RESULTS[job_id] as filtered and balanced partial results
+      so that /search-status and /search-results can return data while still running
     """
     job = JOBS.get(job_id)
     if not job:
@@ -635,76 +684,78 @@ def run_search_job(job_id: str):
 
         total_count = 0
 
-        for index, (dep, ret) in enumerate(date_pairs, start=1):
-            # Update progress
-            job.processed_pairs = index
+        if total_pairs == 0:
+            job.status = JobStatus.COMPLETED
             job.updated_at = datetime.utcnow()
             JOBS[job_id] = job
-            print(
-                f"[JOB {job_id}] processing pair {index}/{total_pairs}: "
-                f"{dep} -> {ret}, collected={total_count}"
-            )
+            print(f"[JOB {job_id}] No date pairs, completed with 0 options")
+            return
 
-            if total_count >= max_offers_total:
-                print(f"[JOB {job_id}] reached max_offers_total={max_offers_total}, stopping early")
-                break
-
-            slices = [
-                {
-                    "origin": job.params.origin,
-                    "destination": job.params.destination,
-                    "departure_date": dep.isoformat(),
-                },
-                {
-                    "origin": job.params.destination,
-                    "destination": job.params.origin,
-                    "departure_date": ret.isoformat(),
-                },
-            ]
-            pax = [{"type": "adult"} for _ in range(job.params.passengers)]
-
-            try:
-                offer_request = duffel_create_offer_request(slices, pax, job.params.cabin)
-                offer_request_id = offer_request.get("id")
-                if not offer_request_id:
-                    print(f"[JOB {job_id}] No offer_request id for pair {dep} -> {ret}")
-                    continue
-
-                per_pair_limit = min(max_offers_pair, max_offers_total - total_count)
-                offers_json = duffel_list_offers(offer_request_id, limit=per_pair_limit)
-            except HTTPException as e:
-                print(f"[JOB {job_id}] Duffel HTTPException for {dep} -> {ret}: {e.detail}")
-                continue
-            except Exception as e:
-                print(f"[JOB {job_id}] Unexpected Duffel error for {dep} -> {ret}: {e}")
-                continue
-
-            # Map this pair's offers to FlightOption objects
-            batch_mapped: List[FlightOption] = []
-            for offer in offers_json:
-                batch_mapped.append(map_duffel_offer_to_option(offer, dep, ret))
-                total_count += 1
+        with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
+            # Process date pairs in batches to limit concurrency
+            for batch_start in range(0, total_pairs, PARALLEL_WORKERS):
                 if total_count >= max_offers_total:
-                    print(f"[JOB {job_id}] reached max_offers_total while adding offers")
+                    print(f"[JOB {job_id}] Reached max_offers_total before batch, stopping")
                     break
 
-            if not batch_mapped:
-                continue
+                batch_pairs = date_pairs[batch_start: batch_start + PARALLEL_WORKERS]
+                futures = {
+                    executor.submit(
+                        process_date_pair_offers,
+                        job.params,
+                        dep,
+                        ret,
+                        max_offers_pair,
+                    ): (dep, ret)
+                    for dep, ret in batch_pairs
+                }
 
-            # Combine with existing partial results and apply filters and balancing
-            existing = JOB_RESULTS.get(job_id, [])
-            combined = existing + batch_mapped
+                for future in as_completed(futures):
+                    dep, ret = futures[future]
 
-            filtered = apply_filters(combined, job.params)
-            balanced = balance_airlines(filtered, max_per_airline=50)
+                    # Mark one more pair as processed for progress bar
+                    job.processed_pairs += 1
+                    job.updated_at = datetime.utcnow()
+                    JOBS[job_id] = job
 
-            JOB_RESULTS[job_id] = balanced
-            print(f"[JOB {job_id}] partial results updated, count={len(balanced)}")
+                    print(
+                        f"[JOB {job_id}] processed pair {job.processed_pairs}/{total_pairs}: "
+                        f"{dep} -> {ret}, current_results={total_count}"
+                    )
 
-            if total_count >= max_offers_total:
-                break
+                    try:
+                        batch_mapped = future.result()
+                    except Exception as e:
+                        print(f"[JOB {job_id}] Future error for pair {dep} -> {ret}: {e}")
+                        continue
 
-        # At this point JOB_RESULTS[job_id] already contains filtered and balanced results
+                    if not batch_mapped:
+                        continue
+
+                    # Combine with existing partial results
+                    existing = JOB_RESULTS.get(job_id, [])
+                    combined = existing + batch_mapped
+
+                    # Apply filters and balancing
+                    filtered = apply_filters(combined, job.params)
+                    balanced = balance_airlines(filtered, max_per_airline=50)
+
+                    # Enforce total cap on number of results stored
+                    if len(balanced) > max_offers_total:
+                        balanced = balanced[:max_offers_total]
+
+                    JOB_RESULTS[job_id] = balanced
+                    total_count = len(balanced)
+
+                    print(f"[JOB {job_id}] partial results updated, count={total_count}")
+
+                    if total_count >= max_offers_total:
+                        print(f"[JOB {job_id}] Reached max_offers_total={max_offers_total}, stopping")
+                        break
+
+                if total_count >= max_offers_total:
+                    break
+
         final_results = JOB_RESULTS.get(job_id, [])
 
         job.status = JobStatus.COMPLETED
