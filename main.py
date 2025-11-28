@@ -750,7 +750,7 @@ def search_business(params: SearchParams, background_tasks: BackgroundTasks):
         }
 
     estimated_pairs = estimate_date_pairs(params)
-    use_async = params.fullCoverage or estimated_pairs > SYNC_PAIR_THRESHOLD
+    use_async = False
 
     if not use_async:
         # Small search, do it inline
