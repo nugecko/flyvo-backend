@@ -233,7 +233,7 @@ CONFIG_MAX_OFFERS_TOTAL = get_config_int("MAX_OFFERS_TOTAL", 5000)
 CONFIG_MAX_OFFERS_PER_PAIR = get_config_int("MAX_OFFERS_PER_PAIR", 50)
 MAX_PASSENGERS = get_config_int("MAX_PASSENGERS", 4)
 DEFAULT_CABIN = get_config_str("DEFAULT_CABIN", "BUSINESS") or "BUSINESS"
-SEARCH_MODE = get_config_str("SEARCH_MODE", "SYNC") or "SYNC"
+SEARCH_MODE = get_config_str("SEARCH_MODE", "AUTO") or "AUTO"
 
 # Hard safety caps, independent from frontend values
 # Control panel values are further clamped by these to protect the container
@@ -895,7 +895,15 @@ def search_business(params: SearchParams, background_tasks: BackgroundTasks):
         params.cabin = DEFAULT_CABIN
 
     estimated_pairs = estimate_date_pairs(params)
-    use_async = params.fullCoverage or estimated_pairs > SYNC_PAIR_THRESHOLD
+
+    # Use SEARCH_MODE from Directus to optionally force sync or async
+    mode = (SEARCH_MODE or "AUTO").upper()
+    if mode == "SYNC":
+        use_async = False
+    elif mode == "ASYNC":
+        use_async = True
+    else:
+        use_async = params.fullCoverage or estimated_pairs > SYNC_PAIR_THRESHOLD
 
     if not use_async:
         # Small search, do it inline
