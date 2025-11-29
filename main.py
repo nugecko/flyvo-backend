@@ -9,9 +9,11 @@ import requests
 from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
-from db import engine, Base
+from db import engine, Base, SessionLocal
 import models  # noqa: F401
+from models import AdminConfig
 
 # =======================================
 # SECTION: AIRLINES IMPORTS
@@ -34,6 +36,45 @@ except ImportError:
         AIRLINE_BOOKING_URL: Dict[str, str] = {}
 
 # ===== END SECTION: AIRLINES IMPORTS =====
+
+
+# =======================================
+# SECTION: ADMIN CONFIG HELPERS
+# =======================================
+
+def _get_config_row(db: Session, key: str) -> Optional[AdminConfig]:
+    return db.query(AdminConfig).filter(AdminConfig.key == key).first()
+
+
+def get_config_str(key: str, default_value: Optional[str] = None) -> Optional[str]:
+    """
+    Read a config value from admin_config as string.
+    If the key is missing or value is null, return default_value.
+    """
+    db = SessionLocal()
+    try:
+        row = _get_config_row(db, key)
+        if not row or row.value is None:
+            return default_value
+        return str(row.value)
+    finally:
+        db.close()
+
+
+def get_config_int(key: str, default_value: int) -> int:
+    """
+    Read a config value from admin_config and cast to int.
+    Falls back to default_value if missing or invalid.
+    """
+    raw = get_config_str(key, None)
+    if raw is None:
+        return default_value
+    try:
+        return int(raw)
+    except ValueError:
+        return default_value
+
+# ===== END SECTION: ADMIN CONFIG HELPERS =====
 
 
 # =======================================
@@ -156,10 +197,12 @@ class SearchResultsResponse(BaseModel):
 
 app = FastAPI()
 
+
 @app.on_event("startup")
 def on_startup():
     # Create all database tables automatically
     Base.metadata.create_all(bind=engine)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -185,11 +228,18 @@ DUFFEL_VERSION = "v2"
 if not DUFFEL_ACCESS_TOKEN:
     print("WARNING: DUFFEL_ACCESS_TOKEN is not set, searches will fail")
 
-# Hard safety caps, regardless of what the frontend sends
-# These are deliberately lower so even aggressive control panel values cannot overload the container
-MAX_OFFERS_PER_PAIR_HARD = 30      # max offers per date pair
-MAX_OFFERS_TOTAL_HARD = 1000       # total offers across all pairs
-MAX_DATE_PAIRS_HARD = 20           # total date pairs scanned per job
+# Limits and defaults coming from admin_config
+CONFIG_MAX_OFFERS_TOTAL = get_config_int("MAX_OFFERS_TOTAL", 5000)
+CONFIG_MAX_OFFERS_PER_PAIR = get_config_int("MAX_OFFERS_PER_PAIR", 50)
+MAX_PASSENGERS = get_config_int("MAX_PASSENGERS", 4)
+DEFAULT_CABIN = get_config_str("DEFAULT_CABIN", "BUSINESS") or "BUSINESS"
+SEARCH_MODE = get_config_str("SEARCH_MODE", "SYNC") or "SYNC"
+
+# Hard safety caps, independent from frontend values
+# Control panel values are further clamped by these to protect the container
+MAX_OFFERS_PER_PAIR_HARD = 30       # max offers per date pair
+MAX_OFFERS_TOTAL_HARD = 1000        # total offers across all pairs
+MAX_DATE_PAIRS_HARD = 20            # total date pairs scanned per job
 
 # Below this number of date pairs, we run synchronously
 SYNC_PAIR_THRESHOLD = 10
@@ -536,11 +586,27 @@ def balance_airlines(options: List[FlightOption], max_per_airline: int = 50) -> 
 
 def effective_caps(params: SearchParams) -> Tuple[int, int, int]:
     """
-    Clamp tuning params against hard caps.
+    Compute effective caps for this search, combining:
+    - frontend hints (maxOffersPerPair, maxOffersTotal, maxDatePairs)
+    - Directus config values
+    - hard coded safety caps
     """
+    # Max date pairs is only clamped by hard cap for now
     max_pairs = max(1, min(params.maxDatePairs, MAX_DATE_PAIRS_HARD))
-    max_offers_pair = max(1, min(params.maxOffersPerPair, MAX_OFFERS_PER_PAIR_HARD))
-    max_offers_total = max(1, min(params.maxOffersTotal, MAX_OFFERS_TOTAL_HARD))
+
+    # Combine frontend request, Directus config and hard caps
+    requested_per_pair = max(1, params.maxOffersPerPair)
+    requested_total = max(1, params.maxOffersTotal)
+
+    max_offers_pair = max(
+        1,
+        min(requested_per_pair, CONFIG_MAX_OFFERS_PER_PAIR, MAX_OFFERS_PER_PAIR_HARD),
+    )
+    max_offers_total = max(
+        1,
+        min(requested_total, CONFIG_MAX_OFFERS_TOTAL, MAX_OFFERS_TOTAL_HARD),
+    )
+
     return max_pairs, max_offers_pair, max_offers_total
 
 
@@ -821,6 +887,13 @@ def search_business(params: SearchParams, background_tasks: BackgroundTasks):
             "options": [],
         }
 
+    # Enforce backend controlled passenger and cabin defaults
+    if params.passengers > MAX_PASSENGERS:
+        params.passengers = MAX_PASSENGERS
+
+    if not params.cabin:
+        params.cabin = DEFAULT_CABIN
+
     estimated_pairs = estimate_date_pairs(params)
     use_async = params.fullCoverage or estimated_pairs > SYNC_PAIR_THRESHOLD
 
@@ -991,6 +1064,9 @@ def duffel_test(
     """
     if not DUFFEL_ACCESS_TOKEN:
         raise HTTPException(status_code=500, detail="Duffel not configured")
+
+    if passengers > MAX_PASSENGERS:
+        passengers = MAX_PASSENGERS
 
     slices = [
         {
