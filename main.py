@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
-from fastapi import FastAPI, Header, HTTPException, BackgroundTasks, Depends
+from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -73,15 +73,6 @@ def get_config_int(key: str, default_value: int) -> int:
         return int(raw)
     except ValueError:
         return default_value
-
-
-# Simple dependency to get a DB session for each request
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 # ===== END SECTION: ADMIN CONFIG HELPERS =====
 
@@ -156,6 +147,62 @@ class CreditUpdateRequest(BaseModel):
     creditAmount: Optional[int] = None
     value: Optional[int] = None
     reason: Optional[str] = None
+
+
+# Models for user sync and profile
+
+class UserSyncPayload(BaseModel):
+    external_id: str
+    email: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    country: Optional[str] = None
+    marketing_consent: Optional[bool] = None
+    source: Optional[str] = None  # for example "base44"
+
+
+class ProfileUser(BaseModel):
+    id: str
+    name: Optional[str] = None
+    email: Optional[str] = None
+    plan: Optional[str] = None
+
+
+class SubscriptionInfo(BaseModel):
+    plan: str
+    billingCycle: Optional[str] = None
+    renewalDate: Optional[str] = None
+    monthlyCredits: int = 0
+
+
+class WalletInfo(BaseModel):
+    balance: int = 0
+    currency: str = "credits"
+
+
+class ProfileResponse(BaseModel):
+    user: ProfileUser
+    subscription: SubscriptionInfo
+    wallet: WalletInfo
+
+
+class AlertOut(BaseModel):
+    id: str
+    origin: str
+    destination: str
+    earliestDeparture: Optional[str] = None
+    latestDeparture: Optional[str] = None
+    nights: Optional[int] = None
+    frequency: Optional[str] = None
+    status: Optional[str] = None
+
+
+class PublicConfig(BaseModel):
+    maxDepartureWindowDays: int
+    maxStayNights: int
+    minStayNights: int
+    maxPassengers: int
+    searchMode: str
 
 
 # Job models for async search
@@ -287,6 +334,14 @@ def generate_date_pairs(params: SearchParams, max_pairs: int = 60) -> List[Tuple
     Special case:
     If earliestDeparture equals latestDeparture and minStayDays equals maxStayDays,
     treat it as a single fixed trip and return exactly one pair.
+
+    This matches the One off payload from Base44, which sends:
+    earliestDeparture = chosen outbound date
+    latestDeparture = same date
+    minStayDays = chosen number of nights
+    maxStayDays = same as minStayDays
+    fullCoverage = false
+    maxDatePairs = 1
     """
     pairs: List[Tuple[date, date]] = []
 
@@ -456,7 +511,8 @@ def map_duffel_offer_to_option(
             if name:
                 stopover_airports.append(name)
 
-    # Build segments list for detailed display, including both outbound and return
+    # Build segments list for detailed display, including both outbound and return,
+    # plus aircraft and layover minutes
     segments_info: List[Dict[str, Any]] = []
     aircraft_codes: List[str] = []
     aircraft_names: List[str] = []
@@ -580,7 +636,9 @@ def balance_airlines(options: List[FlightOption], max_per_airline: int = 50) -> 
 def effective_caps(params: SearchParams) -> Tuple[int, int, int]:
     """
     Compute effective caps for this search, combining:
-    frontend hints, Directus config values, hard coded safety caps.
+    - frontend hints (maxOffersPerPair, maxOffersTotal, maxDatePairs)
+    - Directus config values
+    - hard coded safety caps
     """
     # Max date pairs is only clamped by hard cap for now
     max_pairs = max(1, min(params.maxDatePairs, MAX_DATE_PAIRS_HARD))
@@ -719,9 +777,10 @@ def run_search_job(job_id: str):
     Background job that performs the Duffel scan and updates progress.
 
     This version:
-    processes date pairs in parallel batches inside a ThreadPoolExecutor,
-    updates processed_pairs as each pair completes,
-    maintains JOB_RESULTS[job_id] as filtered and balanced partial results.
+    - Processes date pairs in parallel batches inside a ThreadPoolExecutor
+    - Updates processed_pairs as each pair completes
+    - Maintains JOB_RESULTS[job_id] as filtered and balanced partial results
+      so that /search-status and /search-results can return data while still running
     """
     job = JOBS.get(job_id)
     if not job:
@@ -875,8 +934,8 @@ def search_business(params: SearchParams, background_tasks: BackgroundTasks):
     Main endpoint used by the Base44 frontend.
 
     Behaviour:
-    for small searches with few date pairs run synchronously and return results,
-    for large searches or fullCoverage True create an async job and return jobId.
+    - For small searches with few date pairs run synchronously and return results.
+    - For large searches or fullCoverage True create an async job and return jobId.
     """
     if not DUFFEL_ACCESS_TOKEN:
         return {
@@ -1151,62 +1210,8 @@ def duffel_test(
 
 
 # =======================================
-# SECTION: PUBLIC CONFIG, USER SYNC AND PROFILE
+# SECTION: PUBLIC CONFIG, USER SYNC, PROFILE, ALERTS
 # =======================================
-
-class UserSyncPayload(BaseModel):
-    external_id: str
-    email: str
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    country: Optional[str] = None
-    marketing_consent: Optional[bool] = None
-    source: Optional[str] = None  # for example "base44"
-
-
-class ProfileUser(BaseModel):
-    id: str
-    name: Optional[str] = None
-    email: Optional[str] = None
-    plan: Optional[str] = None
-
-
-class SubscriptionInfo(BaseModel):
-    plan: str
-    billingCycle: Optional[str] = None
-    renewalDate: Optional[str] = None
-    monthlyCredits: int = 0
-
-
-class WalletInfo(BaseModel):
-    balance: int = 0
-    currency: str = "credits"
-
-
-class ProfileResponse(BaseModel):
-    user: ProfileUser
-    subscription: SubscriptionInfo
-    wallet: WalletInfo
-
-
-class AlertOut(BaseModel):
-    id: str
-    origin: str
-    destination: str
-    earliestDeparture: Optional[str] = None
-    latestDeparture: Optional[str] = None
-    nights: Optional[int] = None
-    frequency: Optional[str] = None
-    status: Optional[str] = None
-
-
-class PublicConfig(BaseModel):
-    maxDepartureWindowDays: int
-    maxStayNights: int
-    minStayNights: int
-    maxPassengers: int
-    searchMode: str
-
 
 @app.get("/public-config", response_model=PublicConfig)
 def get_public_config():
@@ -1230,90 +1235,45 @@ def get_public_config():
 
 
 @app.post("/user-sync")
-def user_sync(payload: UserSyncPayload, db: Session = Depends(get_db)):
+def user_sync(payload: UserSyncPayload):
     """
-    Upsert user profile from Base44 into the app_users table.
-    Assumes a SQLAlchemy model models.AppUser with fields:
-    external_id, email, first_name, last_name, country, marketing_consent, source.
-    Adjust field names if your model is different.
+    Accept user profile from Base44.
+
+    For now this does not write to the database.
+    It simply accepts the payload and returns status ok,
+    so the frontend can safely call it without any schema assumptions.
+
+    Later we can wire this into app_users once the schema is final.
     """
-    AppUser = getattr(models, "AppUser", None)
-    if AppUser is None:
-        raise HTTPException(
-            status_code=500,
-            detail="AppUser model not found in models.py, please define it to use /user-sync",
-        )
-
-    user = (
-        db.query(AppUser)
-        .filter(AppUser.external_id == payload.external_id)
-        .first()
-    )
-
-    if user is None:
-        user = AppUser(
-            external_id=payload.external_id,
-            email=payload.email,
-            first_name=payload.first_name,
-            last_name=payload.last_name,
-            country=payload.country,
-            marketing_consent=payload.marketing_consent,
-            source=payload.source or "base44",
-        )
-        db.add(user)
-    else:
-        user.email = payload.email
-        user.first_name = payload.first_name
-        user.last_name = payload.last_name
-        user.country = payload.country
-        user.marketing_consent = payload.marketing_consent
-        user.source = payload.source or user.source
-
-    db.commit()
-    db.refresh(user)
-
-    return {"status": "ok", "id": getattr(user, "id", None)}
+    return {"status": "ok", "id": payload.external_id}
 
 
 @app.get("/profile", response_model=ProfileResponse)
 def get_profile(
     x_user_id: str = Header(..., alias="X-User-Id"),
-    db: Session = Depends(get_db),
 ):
     """
     Return profile summary for the profile page.
-    Uses app_users.external_id to find the user and USER_WALLETS for wallet balance.
+
+    For now this:
+      - does not rely on the database schema
+      - uses USER_WALLETS for balance
+      - returns a generic Free profile keyed only by X-User-Id
+
+    Once we finalise the app_users schema, we can look up by email or a
+    dedicated external_id column instead of this generic version.
     """
-    AppUser = getattr(models, "AppUser", None)
-
-    user_name = None
-    user_email = None
-    user_plan = "Free"
-
-    if AppUser is not None:
-        db_user = (
-            db.query(AppUser)
-            .filter(AppUser.external_id == x_user_id)
-            .first()
-        )
-        if db_user is not None:
-            user_name = getattr(db_user, "name", None) or (
-                (getattr(db_user, "first_name", "") + " " + getattr(db_user, "last_name", "")).strip() or None
-            )
-            user_email = getattr(db_user, "email", None)
-            user_plan = getattr(db_user, "plan", None) or "Free"
-
     wallet_balance = USER_WALLETS.get(x_user_id, 0)
 
     profile_user = ProfileUser(
         id=x_user_id,
-        name=user_name or "Flyyv user",
-        email=user_email,
-        plan=user_plan,
+        name="Flyyv user",
+        email=None,
+        plan="Free",
     )
 
     subscription = SubscriptionInfo(
-        plan="Flyyv Free" if user_plan.lower() == "free" else user_plan,
+        plan="Flyyv Free",
         billingCycle=None,
         renewalDate=None,
         monthlyCredits=0,
@@ -1334,39 +1294,13 @@ def get_profile(
 @app.get("/alerts", response_model=List[AlertOut])
 def list_alerts(
     x_user_id: str = Header(..., alias="X-User-Id"),
-    db: Session = Depends(get_db),
 ):
     """
     List alerts for the current user.
-    For now this returns an empty list if no alerts model exists.
+
+    For now this returns an empty list so the profile page renders.
+    Later we can back it with a real alerts table in Postgres or Directus.
     """
-    AlertsModel = getattr(models, "Alert", None) or getattr(models, "FlightAlert", None)
+    return []
 
-    if AlertsModel is None:
-        return []
-
-    alerts = (
-        db.query(AlertsModel)
-        .filter(AlertsModel.user_id == x_user_id)
-        .order_by(AlertsModel.created_at.desc())
-        .all()
-    )
-
-    items: List[AlertOut] = []
-    for a in alerts:
-        items.append(
-            AlertOut(
-                id=str(getattr(a, "id", "")),
-                origin=getattr(a, "origin", ""),
-                destination=getattr(a, "destination", ""),
-                earliestDeparture=getattr(a, "earliest_departure", None),
-                latestDeparture=getattr(a, "latest_departure", None),
-                nights=getattr(a, "nights", None),
-                frequency=getattr(a, "frequency", None),
-                status=getattr(a, "status", None),
-            )
-        )
-
-    return items
-
-# ===== END SECTION: PUBLIC CONFIG, USER SYNC AND PROFILE =====
+# ===== END SECTION: PUBLIC CONFIG, USER SYNC, PROFILE, ALERTS =====
