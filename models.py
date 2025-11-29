@@ -3,7 +3,7 @@ from sqlalchemy.dialects.postgresql import UUID
 import uuid
 from datetime import datetime
 
-from .db import Base
+from db import Base
 
 class AdminConfig(Base):
     __tablename__ = "admin_config"
