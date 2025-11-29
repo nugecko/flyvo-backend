@@ -3,6 +3,7 @@ from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import List, Optional, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from uuid import uuid4
 
 import requests
 from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
@@ -815,9 +816,6 @@ def list_routes():
 # SECTION: MAIN SEARCH ROUTES
 # =======================================
 
-from uuid import uuid4
-
-
 @app.post("/search-business")
 def search_business(params: SearchParams, background_tasks: BackgroundTasks):
     if not DUFFEL_ACCESS_TOKEN:
@@ -839,12 +837,24 @@ def search_business(params: SearchParams, background_tasks: BackgroundTasks):
 
     search_mode = get_config_str("SEARCH_MODE", "AUTO") or "AUTO"
     mode = (search_mode or "AUTO").upper()
-    if mode == "SYNC":
-        use_async = False
-    elif mode == "ASYNC":
+
+    # Hard safety: if the window creates many date pairs, force async
+    large_window = estimated_pairs > SYNC_PAIR_THRESHOLD
+
+    if large_window:
         use_async = True
     else:
-        use_async = params.fullCoverage or estimated_pairs > SYNC_PAIR_THRESHOLD
+        if mode == "SYNC":
+            use_async = False
+        elif mode == "ASYNC":
+            use_async = True
+        else:
+            use_async = params.fullCoverage or estimated_pairs > SYNC_PAIR_THRESHOLD
+
+    print(
+        f"[search_business] estimated_pairs={estimated_pairs}, "
+        f"mode_config={mode}, fullCoverage={params.fullCoverage}, use_async={use_async}"
+    )
 
     if not use_async:
         options = run_duffel_scan(params)
@@ -895,7 +905,7 @@ def get_search_status(job_id: str, preview_limit: int = 20):
     progress = float(processed_pairs) / float(total_pairs) if total_pairs > 0 else 0.0
 
     return SearchStatusResponse(
-        jobId=job_id,
+        jobId=job.id,
         status=job.status,
         processedPairs=processed_pairs,
         totalPairs=total_pairs,
@@ -921,7 +931,7 @@ def get_search_results(job_id: str, offset: int = 0, limit: int = 50):
     slice_ = options[offset:end]
 
     return SearchResultsResponse(
-        jobId=job_id,
+        jobId=job.id,
         status=job.status,
         totalResults=len(options),
         offset=offset,
