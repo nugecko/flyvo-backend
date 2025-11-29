@@ -845,7 +845,7 @@ def run_search_job(job_id: str):
 
 
 # =======================================
-# SECTION: ROOT AND HEALTH ROUTES
+# SECTION: ROOT, HEALTH AND ROUTES
 # =======================================
 
 @app.get("/")
@@ -857,7 +857,12 @@ def home():
 def health():
     return {"status": "ok"}
 
-# ===== END SECTION: ROOT AND HEALTH ROUTES =====
+
+@app.get("/routes")
+def list_routes():
+    return [route.path for route in app.routes]
+
+# ===== END SECTION: ROOT, HEALTH AND ROUTES =====
 
 
 # =======================================
