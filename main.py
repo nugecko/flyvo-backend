@@ -818,6 +818,13 @@ def list_routes():
 
 @app.post("/search-business")
 def search_business(params: SearchParams, background_tasks: BackgroundTasks):
+    """
+    Main search endpoint.
+
+    One date pair only  sync search, returns results immediately.
+    Multiple date pairs  always async, returns a jobId and lets the background
+    worker do the heavy lifting so we avoid 504 timeouts.
+    """
     if not DUFFEL_ACCESS_TOKEN:
         return {
             "status": "error",
@@ -835,28 +842,14 @@ def search_business(params: SearchParams, background_tasks: BackgroundTasks):
 
     estimated_pairs = estimate_date_pairs(params)
 
-    search_mode = get_config_str("SEARCH_MODE", "AUTO") or "AUTO"
-    mode = (search_mode or "AUTO").upper()
-
-    # Hard safety: if the window creates many date pairs, force async
-    large_window = estimated_pairs > SYNC_PAIR_THRESHOLD
-
-    if large_window:
-        use_async = True
-    else:
-        if mode == "SYNC":
-            use_async = False
-        elif mode == "ASYNC":
-            use_async = True
-        else:
-            use_async = params.fullCoverage or estimated_pairs > SYNC_PAIR_THRESHOLD
-
+    # Log what is happening for debugging
     print(
         f"[search_business] estimated_pairs={estimated_pairs}, "
-        f"mode_config={mode}, fullCoverage={params.fullCoverage}, use_async={use_async}"
+        f"fullCoverage={params.fullCoverage}"
     )
 
-    if not use_async:
+    # If there is only one pair, it is safe to run synchronously
+    if estimated_pairs <= 1:
         options = run_duffel_scan(params)
         return {
             "status": "ok",
@@ -865,6 +858,7 @@ def search_business(params: SearchParams, background_tasks: BackgroundTasks):
             "options": [o.dict() for o in options],
         }
 
+    # Any search with more than one date pair becomes async
     job_id = str(uuid4())
     job = SearchJob(
         id=job_id,
@@ -886,58 +880,6 @@ def search_business(params: SearchParams, background_tasks: BackgroundTasks):
         "jobId": job_id,
         "message": "Search started",
     }
-
-
-@app.get("/search-status/{job_id}", response_model=SearchStatusResponse)
-def get_search_status(job_id: str, preview_limit: int = 20):
-    job = JOBS.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    options = JOB_RESULTS.get(job_id, [])
-    if preview_limit > 0:
-        preview = options[:preview_limit]
-    else:
-        preview = []
-
-    total_pairs = job.total_pairs or 0
-    processed_pairs = job.processed_pairs or 0
-    progress = float(processed_pairs) / float(total_pairs) if total_pairs > 0 else 0.0
-
-    return SearchStatusResponse(
-        jobId=job.id,
-        status=job.status,
-        processedPairs=processed_pairs,
-        totalPairs=total_pairs,
-        progress=progress,
-        error=job.error,
-        previewCount=len(preview),
-        previewOptions=preview,
-    )
-
-
-@app.get("/search-results/{job_id}", response_model=SearchResultsResponse)
-def get_search_results(job_id: str, offset: int = 0, limit: int = 50):
-    job = JOBS.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    options = JOB_RESULTS.get(job_id, [])
-
-    offset = max(0, offset)
-    limit = max(1, min(limit, 200))
-
-    end = min(offset + limit, len(options))
-    slice_ = options[offset:end]
-
-    return SearchResultsResponse(
-        jobId=job.id,
-        status=job.status,
-        totalResults=len(options),
-        offset=offset,
-        limit=limit,
-        options=slice_,
-    )
 
 # ===== END SECTION: MAIN SEARCH ROUTES =====
 
