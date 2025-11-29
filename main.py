@@ -228,13 +228,6 @@ DUFFEL_VERSION = "v2"
 if not DUFFEL_ACCESS_TOKEN:
     print("WARNING: DUFFEL_ACCESS_TOKEN is not set, searches will fail")
 
-# Limits and defaults coming from admin_config
-CONFIG_MAX_OFFERS_TOTAL = get_config_int("MAX_OFFERS_TOTAL", 5000)
-CONFIG_MAX_OFFERS_PER_PAIR = get_config_int("MAX_OFFERS_PER_PAIR", 50)
-MAX_PASSENGERS = get_config_int("MAX_PASSENGERS", 4)
-DEFAULT_CABIN = get_config_str("DEFAULT_CABIN", "BUSINESS") or "BUSINESS"
-SEARCH_MODE = get_config_str("SEARCH_MODE", "AUTO") or "AUTO"
-
 # Hard safety caps, independent from frontend values
 # Control panel values are further clamped by these to protect the container
 MAX_OFFERS_PER_PAIR_HARD = 30       # max offers per date pair
@@ -299,14 +292,14 @@ def generate_date_pairs(params: SearchParams, max_pairs: int = 60) -> List[Tuple
     min_stay = max(1, params.minStayDays)
     max_stay = max(min_stay, params.maxStayDays)
 
-    # One off fixed trip: earliest equals latest and single stay length
+    # One off fixed trip
     if params.earliestDeparture == params.latestDeparture and min_stay == max_stay:
         dep = params.earliestDeparture
         ret = dep + timedelta(days=min_stay)
         pairs.append((dep, ret))
         return pairs[:max_pairs]
 
-    # Normal flexible window behaviour for Smart mode
+    # Normal flexible window behaviour
     stays = list(range(min_stay, max_stay + 1))
     current = params.earliestDeparture
 
@@ -598,13 +591,16 @@ def effective_caps(params: SearchParams) -> Tuple[int, int, int]:
     requested_per_pair = max(1, params.maxOffersPerPair)
     requested_total = max(1, params.maxOffersTotal)
 
+    config_max_offers_pair = get_config_int("MAX_OFFERS_PER_PAIR", 50)
+    config_max_offers_total = get_config_int("MAX_OFFERS_TOTAL", 5000)
+
     max_offers_pair = max(
         1,
-        min(requested_per_pair, CONFIG_MAX_OFFERS_PER_PAIR, MAX_OFFERS_PER_PAIR_HARD),
+        min(requested_per_pair, config_max_offers_pair, MAX_OFFERS_PER_PAIR_HARD),
     )
     max_offers_total = max(
         1,
-        min(requested_total, CONFIG_MAX_OFFERS_TOTAL, MAX_OFFERS_TOTAL_HARD),
+        min(requested_total, config_max_offers_total, MAX_OFFERS_TOTAL_HARD),
     )
 
     return max_pairs, max_offers_pair, max_offers_total
@@ -888,16 +884,19 @@ def search_business(params: SearchParams, background_tasks: BackgroundTasks):
         }
 
     # Enforce backend controlled passenger and cabin defaults
-    if params.passengers > MAX_PASSENGERS:
-        params.passengers = MAX_PASSENGERS
+    max_passengers = get_config_int("MAX_PASSENGERS", 4)
+    if params.passengers > max_passengers:
+        params.passengers = max_passengers
 
+    default_cabin = get_config_str("DEFAULT_CABIN", "BUSINESS") or "BUSINESS"
     if not params.cabin:
-        params.cabin = DEFAULT_CABIN
+        params.cabin = default_cabin
 
     estimated_pairs = estimate_date_pairs(params)
 
     # Use SEARCH_MODE from Directus to optionally force sync or async
-    mode = (SEARCH_MODE or "AUTO").upper()
+    search_mode = get_config_str("SEARCH_MODE", "AUTO") or "AUTO"
+    mode = (search_mode or "AUTO").upper()
     if mode == "SYNC":
         use_async = False
     elif mode == "ASYNC":
@@ -1055,6 +1054,40 @@ def admin_add_credits(
 
 
 # =======================================
+# SECTION: CONFIG DEBUG ENDPOINT
+# =======================================
+
+@app.get("/config-debug")
+def config_debug(
+    x_admin_token: str = Header(None, alias="X-Admin-Token"),
+):
+    received = (x_admin_token or "").strip()
+    expected = (ADMIN_API_TOKEN or "").strip()
+
+    if received.lower().startswith("bearer "):
+        received = received[7:].strip()
+
+    if expected == "":
+        raise HTTPException(status_code=500, detail="Admin token not configured")
+
+    if received != expected:
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+
+    return {
+        "MAX_OFFERS_TOTAL": get_config_int("MAX_OFFERS_TOTAL", 5000),
+        "MAX_OFFERS_PER_PAIR": get_config_int("MAX_OFFERS_PER_PAIR", 50),
+        "MAX_PASSENGERS": get_config_int("MAX_PASSENGERS", 4),
+        "DEFAULT_CABIN": get_config_str("DEFAULT_CABIN", "BUSINESS") or "BUSINESS",
+        "SEARCH_MODE": get_config_str("SEARCH_MODE", "AUTO") or "AUTO",
+        "MAX_OFFERS_PER_PAIR_HARD": MAX_OFFERS_PER_PAIR_HARD,
+        "MAX_OFFERS_TOTAL_HARD": MAX_OFFERS_TOTAL_HARD,
+        "MAX_DATE_PAIRS_HARD": MAX_DATE_PAIRS_HARD,
+    }
+
+# ===== END SECTION: CONFIG DEBUG ENDPOINT =====
+
+
+# =======================================
 # SECTION: DUFFEL TEST ENDPOINT
 # =======================================
 
@@ -1073,8 +1106,9 @@ def duffel_test(
     if not DUFFEL_ACCESS_TOKEN:
         raise HTTPException(status_code=500, detail="Duffel not configured")
 
-    if passengers > MAX_PASSENGERS:
-        passengers = MAX_PASSENGERS
+    max_passengers = get_config_int("MAX_PASSENGERS", 4)
+    if passengers > max_passengers:
+        passengers = max_passengers
 
     slices = [
         {
