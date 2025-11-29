@@ -1,4 +1,5 @@
 import os
+
 from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import List, Optional, Tuple, Dict, Any
@@ -8,6 +9,9 @@ import requests
 from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+from db import engine, Base
+import models  # noqa: F401
 
 # =======================================
 # SECTION: AIRLINES IMPORTS
@@ -151,6 +155,11 @@ class SearchResultsResponse(BaseModel):
 # =======================================
 
 app = FastAPI()
+
+@app.on_event("startup")
+def on_startup():
+    # Create all database tables automatically
+    Base.metadata.create_all(bind=engine)
 
 app.add_middleware(
     CORSMiddleware,
