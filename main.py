@@ -1000,6 +1000,7 @@ def send_test_alert_email() -> None:
 def send_daily_alert_email() -> None:
     """
     Build and send the price watch alert email for the configured window.
+    Shows one highlighted deal per date pair (the cheapest).
     """
     if not (SMTP_USERNAME and SMTP_PASSWORD and ALERT_TO_EMAIL):
         raise HTTPException(
@@ -1037,12 +1038,15 @@ def send_daily_alert_email() -> None:
     lines.append(f"Date window: {start_label} to {end_label}")
     lines.append("")
 
+    # Top section, only if there are any fares under threshold
     if any_under:
         lines.append(f"Deals under £{int(threshold)} found:")
         lines.append("")
+
         for p in pairs:
             if p["status"] != "under_threshold":
                 continue
+
             dep_iso = p["departureDate"]
             ret_iso = p["returnDate"]
             dep_dt = datetime.fromisoformat(dep_iso)
@@ -1050,25 +1054,41 @@ def send_daily_alert_email() -> None:
             dep_label = dep_dt.strftime("%d %b")
             ret_label = ret_dt.strftime("%d %b")
 
-            flights_under = p["flightsUnderThreshold"]
-            if not flights_under:
+            cheapest_price = p["cheapestPrice"]
+            cheapest_airline = p["cheapestAirline"]
+            if cheapest_price is None or cheapest_airline is None:
                 continue
 
-            for f in flights_under:
-                lines.append(
-                    f"{dep_label} \u2192 {ret_label}: £{int(f['price'])} with {f['airline']}"
-                )
-                lines.append(f"  Route: {f['origin']} \u2192 {f['destination']}")
-                lines.append(f"  View in Flyyv: {f['flyyvLink']}")
-                if f.get("airlineUrl"):
-                    lines.append(f"  Airline site: {f['airlineUrl']}")
-                lines.append("")
+            flights_under = p.get("flightsUnderThreshold") or []
+            primary = flights_under[0] if flights_under else None
+
+            # Build a simple route and links from the first qualifying flight
+            if primary:
+                route = f"{primary['origin']} \u2192 {primary['destination']}"
+                flyyv_link = primary["flyyvLink"]
+                airline_url = primary.get("airlineUrl") or ""
+            else:
+                # Fallback route if for some reason we have no flight details
+                route = f"{watch['origin']} \u2192 {watch['destination']}"
+                flyyv_link = ""
+                airline_url = ""
+
+            lines.append(
+                f"{dep_label} \u2192 {ret_label}: £{int(cheapest_price)} with {cheapest_airline}"
+            )
+            lines.append(f"  Route: {route}")
+            if flyyv_link:
+                lines.append(f"  View in Flyyv: {flyyv_link}")
+            if airline_url:
+                lines.append(f"  Airline site: {airline_url}")
+            lines.append("")
     else:
         lines.append(
             f"No fares under £{int(threshold)} were found for any watched dates."
         )
         lines.append("")
 
+    # Summary of all watched date pairs, unchanged logic
     lines.append("Summary of all watched dates:")
     lines.append("")
 
