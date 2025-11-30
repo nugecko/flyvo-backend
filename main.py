@@ -836,6 +836,8 @@ def run_price_watch() -> Dict[str, Any]:
     """
     Single test watch rule:
     origin, destination, start, end, stay nights and max price are from env.
+    For each date pair we keep only the single cheapest flight under threshold,
+    so the email shows at most one highlighted deal per pair.
     """
     if not WATCH_START_DATE or not WATCH_END_DATE:
         raise HTTPException(
@@ -911,25 +913,22 @@ def run_price_watch() -> Dict[str, Any]:
 
             flights_under = []
             if status == "under_threshold":
-                for f in flights_sorted:
-                    if f.price <= WATCH_MAX_PRICE:
-                        flyyv_link = build_flyyv_link(params, f.departureDate, f.returnDate)
-                        flights_under.append(
-                            {
-                                "airline": f.airline,
-                                "airlineCode": f.airlineCode,
-                                "price": f.price,
-                                "currency": f.currency,
-                                "origin": f.origin,
-                                "destination": f.destination,
-                                "departureDate": f.departureDate,
-                                "returnDate": f.returnDate,
-                                "flyyvLink": flyyv_link,
-                                "airlineUrl": f.url or "",
-                            }
-                        )
-                    if len(flights_under) >= 3:
-                        break
+                # Keep only the single cheapest flight per pair
+                flyyv_link = build_flyyv_link(params, cheapest.departureDate, cheapest.returnDate)
+                flights_under.append(
+                    {
+                        "airline": cheapest.airline,
+                        "airlineCode": cheapest.airlineCode,
+                        "price": cheapest.price,
+                        "currency": cheapest.currency,
+                        "origin": cheapest.origin,
+                        "destination": cheapest.destination,
+                        "departureDate": cheapest.departureDate,
+                        "returnDate": cheapest.returnDate,
+                        "flyyvLink": flyyv_link,
+                        "airlineUrl": cheapest.url or "",
+                    }
+                )
 
         pairs_summary.append(
             {
