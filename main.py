@@ -94,8 +94,8 @@ class SearchParams(BaseModel):
     stopsFilter: Optional[List[int]] = None
 
     # Target 50-100 offers per date pair, default via config will clamp
-    maxOffersPerPair: int = 80
-    maxOffersTotal: int = 4000
+    maxOffersPerPair: int = 300
+    maxOffersTotal: int = 10000
     maxDatePairs: int = 60
 
     fullCoverage: bool = True
@@ -569,7 +569,7 @@ def balance_airlines(
     """
     Ensure airlines get fair representation while keeping cheapest options first.
     Uses MAX_AIRLINE_SHARE_PERCENT from AdminConfig, default 40 percent.
-    The cap is applied relative to the actual list size, not just the global max.
+    The cap is applied relative to the actual result size and is not relaxed later.
     """
     if not options:
         return []
@@ -579,7 +579,6 @@ def balance_airlines(
     if max_total is None or max_total <= 0:
         max_total = len(sorted_by_price)
 
-    # Work with the smaller of max_total and the actual list size
     actual_total = min(max_total, len(sorted_by_price))
 
     max_share_percent = get_config_int("MAX_AIRLINE_SHARE_PERCENT", 40)
@@ -592,7 +591,6 @@ def balance_airlines(
     unique_airlines = {o.airlineCode or o.airline for o in sorted_by_price}
     num_airlines = max(1, len(unique_airlines))
 
-    # Cap per airline based on the actual result size
     base_cap = max(1, (max_share_percent * actual_total) // 100)
     per_airline_cap = max(base_cap, actual_total // num_airlines if num_airlines else base_cap)
 
@@ -606,17 +604,6 @@ def balance_airlines(
 
         airline_counts[key] += 1
         result.append(opt)
-
-    # Fill remaining slots, still sorted by price, without additional airline cap
-    if len(result) < actual_total:
-        already_ids = {o.id for o in result}
-        for opt in sorted_by_price:
-            if len(result) >= actual_total:
-                break
-            if opt.id in already_ids:
-                continue
-            result.append(opt)
-            already_ids.add(opt.id)
 
     result.sort(key=lambda x: x.price)
     return result
