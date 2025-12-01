@@ -1,7 +1,7 @@
 {
   "cron": [
     {
-      "command": "curl -s http://localhost:5000/trigger-daily-alert",
+      "command": "curl -s https://api.flyyv.com/trigger-daily-alert >/dev/null 2>&1",
       "schedule": "*/30 * * * *"
     }
   ]
