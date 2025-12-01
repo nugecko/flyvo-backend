@@ -93,9 +93,10 @@ class SearchParams(BaseModel):
     passengers: int = 1
     stopsFilter: Optional[List[int]] = None
 
-    maxOffersPerPair: int = 50
-    maxOffersTotal: int = 5000
-    maxDatePairs: int = 45
+    # Target 50-100 offers per date pair, default via config will clamp
+    maxOffersPerPair: int = 80
+    maxOffersTotal: int = 4000
+    maxDatePairs: int = 60
 
     fullCoverage: bool = True
 
@@ -258,12 +259,14 @@ DUFFEL_VERSION = "v2"
 if not DUFFEL_ACCESS_TOKEN:
     print("WARNING: DUFFEL_ACCESS_TOKEN is not set, searches will fail")
 
-MAX_OFFERS_PER_PAIR_HARD = 40
-MAX_OFFERS_TOTAL_HARD = 500
-MAX_DATE_PAIRS_HARD = 20
+# Hard caps, tuned for two month window and 50-100 offers per pair
+MAX_OFFERS_PER_PAIR_HARD = 100
+MAX_OFFERS_TOTAL_HARD = 4000
+MAX_DATE_PAIRS_HARD = 60
 
 SYNC_PAIR_THRESHOLD = 10
-PARALLEL_WORKERS = 2
+# Base default, can be overridden via AdminConfig in run_search_job
+PARALLEL_WORKERS = 6
 
 # Email alert configuration for SMTP2Go
 SMTP_HOST = os.getenv("SMTP_HOST", "mail-eu.smtp2go.com")
@@ -559,18 +562,62 @@ def apply_filters(options: List[FlightOption], params: SearchParams) -> List[Fli
     return filtered
 
 
-def balance_airlines(options: List[FlightOption], max_per_airline: int = 50) -> List[FlightOption]:
-    buckets: Dict[str, List[FlightOption]] = {}
-    for opt in options:
+def balance_airlines(
+    options: List[FlightOption],
+    max_total: Optional[int] = None,
+) -> List[FlightOption]:
+    """
+    Ensure airlines get fair representation while keeping cheapest options first.
+    Uses MAX_AIRLINE_SHARE_PERCENT from AdminConfig, default 40 percent.
+    """
+    if not options:
+        return []
+
+    sorted_by_price = sorted(options, key=lambda x: x.price)
+
+    if max_total is None or max_total <= 0:
+        max_total = len(sorted_by_price)
+
+    max_share_percent = get_config_int("MAX_AIRLINE_SHARE_PERCENT", 40)
+    if max_share_percent <= 0 or max_share_percent > 100:
+        max_share_percent = 40
+
+    airline_counts: Dict[str, int] = defaultdict(int)
+    result: List[FlightOption] = []
+
+    unique_airlines = {o.airlineCode or o.airline for o in sorted_by_price}
+    num_airlines = max(1, len(unique_airlines))
+
+    # Hard cap per airline based on allowed share
+    # Example with max_total 100 and 40 percent share gives 40 max per airline
+    base_cap = max(1, (max_share_percent * max_total) // 100)
+    # Also ensure at least a small number per airline when possible
+    per_airline_cap = max(base_cap, max_total // num_airlines if num_airlines else base_cap)
+
+    for opt in sorted_by_price:
+        if len(result) >= max_total:
+            break
+
         key = opt.airlineCode or opt.airline
-        buckets.setdefault(key, []).append(opt)
+        if airline_counts[key] >= per_airline_cap:
+            continue
 
-    trimmed: List[FlightOption] = []
-    for key, bucket in buckets.items():
-        trimmed.extend(bucket[:max_per_airline])
+        airline_counts[key] += 1
+        result.append(opt)
 
-    trimmed.sort(key=lambda x: x.price)
-    return trimmed
+    # If we are still under max_total, fill remaining slots without extra fairness limit
+    if len(result) < max_total:
+        already_ids = {o.id for o in result}
+        for opt in sorted_by_price:
+            if len(result) >= max_total:
+                break
+            if opt.id in already_ids:
+                continue
+            result.append(opt)
+            already_ids.add(opt.id)
+
+    result.sort(key=lambda x: x.price)
+    return result
 
 # ===== END SECTION: FILTERING AND BALANCING =====
 
@@ -585,8 +632,9 @@ def effective_caps(params: SearchParams) -> Tuple[int, int, int]:
     requested_per_pair = max(1, params.maxOffersPerPair)
     requested_total = max(1, params.maxOffersTotal)
 
-    config_max_offers_pair = get_config_int("MAX_OFFERS_PER_PAIR", 50)
-    config_max_offers_total = get_config_int("MAX_OFFERS_TOTAL", 5000)
+    # Config driven caps with higher defaults for 2 month window
+    config_max_offers_pair = get_config_int("MAX_OFFERS_PER_PAIR", 80)
+    config_max_offers_total = get_config_int("MAX_OFFERS_TOTAL", 4000)
 
     max_offers_pair = max(
         1,
@@ -652,7 +700,7 @@ def run_duffel_scan(params: SearchParams) -> List[FlightOption]:
     ]
 
     filtered = apply_filters(mapped, params)
-    balanced = balance_airlines(filtered, max_per_airline=50)
+    balanced = balance_airlines(filtered, max_total=max_offers_total)
     return balanced
 
 # ===== END SECTION: SHARED SEARCH HELPERS =====
@@ -739,13 +787,17 @@ def run_search_job(job_id: str):
             print(f"[JOB {job_id}] No date pairs, completed with 0 options")
             return
 
-        with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
-            for batch_start in range(0, total_pairs, PARALLEL_WORKERS):
+        # Allow tuning of worker count from AdminConfig
+        parallel_workers = get_config_int("PARALLEL_WORKERS", PARALLEL_WORKERS)
+        parallel_workers = max(1, min(parallel_workers, 16))
+
+        with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+            for batch_start in range(0, total_pairs, parallel_workers):
                 if total_count >= max_offers_total:
                     print(f"[JOB {job_id}] Reached max_offers_total before batch, stopping")
                     break
 
-                batch_pairs = date_pairs[batch_start: batch_start + PARALLEL_WORKERS]
+                batch_pairs = date_pairs[batch_start: batch_start + parallel_workers]
                 futures = {
                     executor.submit(
                         process_date_pair_offers,
@@ -782,7 +834,7 @@ def run_search_job(job_id: str):
                     combined = existing + batch_mapped
 
                     filtered = apply_filters(combined, job.params)
-                    balanced = balance_airlines(filtered, max_per_airline=50)
+                    balanced = balance_airlines(filtered, max_total=max_offers_total)
 
                     if len(balanced) > max_offers_total:
                         balanced = balanced[:max_offers_total]
@@ -1189,8 +1241,8 @@ def search_business(params: SearchParams, background_tasks: BackgroundTasks):
     """
     Main search endpoint.
 
-    One date pair only  sync search, returns results immediately.
-    Multiple date pairs  always async, returns a jobId and lets the background
+    One date pair only sync search, returns results immediately.
+    Multiple date pairs always async, returns a jobId and lets the background
     worker do the heavy lifting so we avoid 504 timeouts.
     """
     if not DUFFEL_ACCESS_TOKEN:
@@ -1397,14 +1449,16 @@ def config_debug(
         raise HTTPException(status_code=401, detail="Invalid admin token")
 
     return {
-        "MAX_OFFERS_TOTAL": get_config_int("MAX_OFFERS_TOTAL", 5000),
-        "MAX_OFFERS_PER_PAIR": get_config_int("MAX_OFFERS_PER_PAIR", 50),
+        "MAX_OFFERS_TOTAL": get_config_int("MAX_OFFERS_TOTAL", 4000),
+        "MAX_OFFERS_PER_PAIR": get_config_int("MAX_OFFERS_PER_PAIR", 80),
         "MAX_PASSENGERS": get_config_int("MAX_PASSENGERS", 4),
         "DEFAULT_CABIN": get_config_str("DEFAULT_CABIN", "BUSINESS") or "BUSINESS",
         "SEARCH_MODE": get_config_str("SEARCH_MODE", "AUTO") or "AUTO",
         "MAX_OFFERS_PER_PAIR_HARD": MAX_OFFERS_PER_PAIR_HARD,
         "MAX_OFFERS_TOTAL_HARD": MAX_OFFERS_TOTAL_HARD,
         "MAX_DATE_PAIRS_HARD": MAX_DATE_PAIRS_HARD,
+        "PARALLEL_WORKERS": get_config_int("PARALLEL_WORKERS", PARALLEL_WORKERS),
+        "MAX_AIRLINE_SHARE_PERCENT": get_config_int("MAX_AIRLINE_SHARE_PERCENT", 40),
     }
 
 # ===== END SECTION: CONFIG DEBUG ENDPOINT =====
@@ -1472,7 +1526,8 @@ def duffel_test(
 
 @app.get("/public-config", response_model=PublicConfig)
 def public_config():
-    max_window = get_config_int("MAX_DEPARTURE_WINDOW_DAYS", 30)
+    # Open the UI search window to 2 months by default
+    max_window = get_config_int("MAX_DEPARTURE_WINDOW_DAYS", 60)
     max_stay = get_config_int("MAX_STAY_NIGHTS", 30)
     min_stay = get_config_int("MIN_STAY_NIGHTS", 1)
     max_passengers = get_config_int("MAX_PASSENGERS", 4)
