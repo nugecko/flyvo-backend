@@ -933,6 +933,16 @@ def run_price_watch() -> Dict[str, Any]:
 
     # Actual scan, may be capped by hard limits
     options = run_duffel_scan(params)
+    
+        # Find the last date pair that actually produced results in this scan
+    scanned_pairs: List[Tuple[str, str]] = sorted(
+        {(opt.departureDate, opt.returnDate) for opt in options}
+    )
+    if scanned_pairs:
+        last_scanned_dep, last_scanned_ret = scanned_pairs[-1]
+    else:
+        last_scanned_dep = None
+        last_scanned_ret = None
 
     grouped: Dict[Tuple[str, str], List[FlightOption]] = defaultdict(list)
     for opt in options:
@@ -945,6 +955,11 @@ def run_price_watch() -> Dict[str, Any]:
     for dep, ret in watched_pairs:
         dep_str = dep.isoformat()
         ret_str = ret.isoformat()
+
+        # Stop listing once we pass the last departure date that produced results
+        if last_scanned_dep is not None and dep_str > last_scanned_dep:
+            break
+
         flights = grouped.get((dep_str, ret_str), [])
 
         if not flights:
@@ -1017,6 +1032,8 @@ def run_price_watch() -> Dict[str, Any]:
         "stay_nights": WATCH_STAY_NIGHTS,
         "max_price": WATCH_MAX_PRICE,
         "any_under_threshold": any_under,
+        "last_scanned_departure": last_scanned_dep,
+        "last_scanned_return": last_scanned_ret,
         "pairs": pairs_summary,
     }
 
