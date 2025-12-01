@@ -11,12 +11,12 @@ from email.message import EmailMessage
 import requests
 from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 from sqlalchemy.orm import Session
 
 from db import engine, Base, SessionLocal
 import models  # noqa: F401
-from models import AdminConfig, AppUser
+from models import AdminConfig, AppUser, Alert, AlertRun
 
 # =======================================
 # SECTION: AIRLINES IMPORTS
@@ -93,7 +93,6 @@ class SearchParams(BaseModel):
     passengers: int = 1
     stopsFilter: Optional[List[int]] = None
 
-    # Target 50-100 offers per date pair, default via config will clamp
     maxOffersPerPair: int = 300
     maxOffersTotal: int = 10000
     maxDatePairs: int = 60
@@ -220,6 +219,37 @@ class PublicConfig(BaseModel):
     minStayNights: int
     maxPassengers: int
 
+
+class AlertBase(BaseModel):
+    email: EmailStr
+    origin: str
+    destination: str
+    cabin: str
+
+    departure_start: date
+    departure_end: date
+    return_start: Optional[date] = None
+    return_end: Optional[date] = None
+
+    alert_type: str
+    max_price: Optional[int] = None
+
+
+class AlertCreate(AlertBase):
+    pass
+
+
+class AlertOut(AlertBase):
+    id: str
+    times_sent: int
+    is_active: bool
+    last_price: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        orm_mode = True
+
 # ===== END SECTION: Pydantic MODELS =====
 
 
@@ -259,16 +289,13 @@ DUFFEL_VERSION = "v2"
 if not DUFFEL_ACCESS_TOKEN:
     print("WARNING: DUFFEL_ACCESS_TOKEN is not set, searches will fail")
 
-# Hard caps, tuned for two month window and 50-100 offers per pair
 MAX_OFFERS_PER_PAIR_HARD = 300
 MAX_OFFERS_TOTAL_HARD = 4000
 MAX_DATE_PAIRS_HARD = 60
 
 SYNC_PAIR_THRESHOLD = 10
-# Base default, can be overridden via AdminConfig in run_search_job
 PARALLEL_WORKERS = 6
 
-# Email alert configuration for SMTP2Go
 SMTP_HOST = os.getenv("SMTP_HOST", "mail-eu.smtp2go.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "2525"))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME")
@@ -276,18 +303,15 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 ALERT_FROM_EMAIL = os.getenv("ALERT_FROM_EMAIL", "price-alert@flyyv.com")
 ALERT_TO_EMAIL = os.getenv("ALERT_TO_EMAIL")
 
-# Frontend base URL for deep links in alert emails
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://app.flyyv.com")
 
-# Simple single price watch config for testing
 WATCH_ORIGIN = os.getenv("WATCH_ORIGIN", "LON")
 WATCH_DESTINATION = os.getenv("WATCH_DESTINATION", "TLV")
-WATCH_START_DATE = os.getenv("WATCH_START_DATE")  # YYYY-MM-DD
-WATCH_END_DATE = os.getenv("WATCH_END_DATE")      # YYYY-MM-DD
+WATCH_START_DATE = os.getenv("WATCH_START_DATE")
+WATCH_END_DATE = os.getenv("WATCH_END_DATE")
 WATCH_STAY_NIGHTS = int(os.getenv("WATCH_STAY_NIGHTS", "7"))
 WATCH_MAX_PRICE = float(os.getenv("WATCH_MAX_PRICE", "720"))
 
-# Global toggle for alerts
 ALERTS_ENABLED = os.getenv("ALERTS_ENABLED", "true").lower() == "true"
 
 # ===== END SECTION: ENV, DUFFEL AND EMAIL CONFIG =====
@@ -566,11 +590,6 @@ def balance_airlines(
     options: List[FlightOption],
     max_total: Optional[int] = None,
 ) -> List[FlightOption]:
-    """
-    Ensure airlines get fair representation while keeping cheapest options first.
-    Uses MAX_AIRLINE_SHARE_PERCENT from AdminConfig, default 40 percent.
-    The cap is applied relative to the actual result size and is not relaxed later.
-    """
     if not options:
         return []
 
@@ -616,26 +635,15 @@ def balance_airlines(
 # =======================================
 
 def effective_caps(params: SearchParams) -> Tuple[int, int, int]:
-    """
-    Decide how many date pairs and offers to scan in total.
-
-    We ignore any maxDatePairs coming from the frontend and instead use
-    an admin config key MAX_DATE_PAIRS, so Smart mode always scans the
-    full window you define in Directus.
-    """
-    # How many departure/return pairs we are allowed to scan
     config_max_pairs = get_config_int("MAX_DATE_PAIRS", 60)
     max_pairs = max(1, min(config_max_pairs, MAX_DATE_PAIRS_HARD))
 
-    # Requested caps from the client
     requested_per_pair = max(1, params.maxOffersPerPair)
     requested_total = max(1, params.maxOffersTotal)
 
-    # Global caps from admin config
     config_max_offers_pair = get_config_int("MAX_OFFERS_PER_PAIR", 80)
     config_max_offers_total = get_config_int("MAX_OFFERS_TOTAL", 4000)
 
-    # Final per pair and total caps, respecting both config and hard limits
     max_offers_pair = max(
         1,
         min(requested_per_pair, config_max_offers_pair, MAX_OFFERS_PER_PAIR_HARD),
@@ -787,7 +795,6 @@ def run_search_job(job_id: str):
             print(f"[JOB {job_id}] No date pairs, completed with 0 options")
             return
 
-        # Allow tuning of worker count from AdminConfig
         parallel_workers = get_config_int("PARALLEL_WORKERS", PARALLEL_WORKERS)
         parallel_workers = max(1, min(parallel_workers, 16))
 
@@ -885,15 +892,6 @@ def build_flyyv_link(params: SearchParams, departure: str, return_date: str) -> 
 
 
 def run_price_watch() -> Dict[str, Any]:
-    """
-    Single test watch rule:
-    origin, destination, start, end, stay nights and max price are from env.
-    For each date pair we store:
-      - totalFlights
-      - minPrice and maxPrice
-      - whether any fare is under WATCH_MAX_PRICE
-      - a single representative flight under the threshold for deep links
-    """
     if not WATCH_START_DATE or not WATCH_END_DATE:
         raise HTTPException(
             status_code=500,
@@ -928,13 +926,9 @@ def run_price_watch() -> Dict[str, Any]:
         stopsFilter=None,
     )
 
-    # All watched date pairs, even ones that return no data
     watched_pairs = generate_date_pairs(params, max_pairs=365)
-
-    # Actual scan, may be capped by hard limits
     options = run_duffel_scan(params)
 
-    # Find the last date pair that actually produced results in this scan
     scanned_pairs: List[Tuple[str, str]] = sorted(
         {(opt.departureDate, opt.returnDate) for opt in options}
     )
@@ -956,7 +950,6 @@ def run_price_watch() -> Dict[str, Any]:
         dep_str = dep.isoformat()
         ret_str = ret.isoformat()
 
-        # Stop listing once we pass the last departure date that produced results
         if last_scanned_dep is not None and dep_str > last_scanned_dep:
             break
 
@@ -990,7 +983,6 @@ def run_price_watch() -> Dict[str, Any]:
 
             flights_under = []
             if status == "under_threshold":
-                # Keep only the single cheapest flight per pair for deep linking
                 flyyv_link = build_flyyv_link(params, cheapest.departureDate, cheapest.returnDate)
                 flights_under.append(
                     {
@@ -1045,12 +1037,6 @@ def run_price_watch() -> Dict[str, Any]:
 # =======================================
 
 def send_test_alert_email() -> None:
-    """
-    Simple SMTP test using SMTP2Go.
-    Uses environment variables:
-    SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD,
-    ALERT_FROM_EMAIL, ALERT_TO_EMAIL
-    """
     if not (SMTP_USERNAME and SMTP_PASSWORD and ALERT_TO_EMAIL):
         raise HTTPException(
             status_code=500,
@@ -1079,14 +1065,6 @@ def send_test_alert_email() -> None:
 
 
 def send_daily_alert_email() -> None:
-    """
-    Build and send the price watch alert email for the configured window.
-    Shows one line per date pair, with:
-      - number of flights found
-      - price range
-      - cheapest fare and airline
-      - Flyyv and airline links only for pairs under the threshold
-    """
     if not (SMTP_USERNAME and SMTP_PASSWORD and ALERT_TO_EMAIL):
         raise HTTPException(
             status_code=500,
@@ -1115,7 +1093,6 @@ def send_daily_alert_email() -> None:
 
     lines: List[str] = []
 
-    # Header
     lines.append(
         f"Watch: {watch['origin']} \u2192 {watch['destination']}, "
         f"{watch['cabin'].title()} class, "
@@ -1124,7 +1101,6 @@ def send_daily_alert_email() -> None:
     lines.append(f"Date window: {start_label} to {end_label}")
     lines.append("")
 
-    # Top section, only if there are any fares under threshold
     if any_under:
         lines.append(f"Deals found under your £{int(threshold)} limit:")
         lines.append("")
@@ -1181,7 +1157,6 @@ def send_daily_alert_email() -> None:
         )
         lines.append("")
 
-    # Summary of all watched date pairs
     lines.append("Summary of all watched dates:")
     lines.append("")
 
@@ -1199,8 +1174,6 @@ def send_daily_alert_email() -> None:
         max_price = p.get("maxPrice")
 
         if status == "no_data":
-            # No options were stored for this date pair in this scan,
-            # usually due to an API timeout or hitting a cap.
             note = "no data captured in this scan"
         elif total_flights == 0 or min_price is None or max_price is None:
             note = "no flights returned"
@@ -1255,29 +1228,16 @@ def list_routes():
 
 @app.get("/test-email-alert")
 def test_email_alert():
-    """
-    Simple endpoint to verify SMTP2Go configuration.
-    Open /test-email-alert in a browser and you should receive an email.
-    """
     send_test_alert_email()
     return {"detail": "Test alert email sent"}
 
 
 @app.get("/trigger-daily-alert")
 def trigger_daily_alert(background_tasks: BackgroundTasks):
-    """
-    Endpoint that queues the price watch alert email.
-    This is what cron will call every N minutes.
-    The heavy work runs in a background task so the HTTP response
-    returns quickly and avoids proxy timeouts.
-    """
     if not ALERTS_ENABLED:
         return {"detail": "Alerts are currently disabled"}
 
-    # Run the full watch and email in the background
     background_tasks.add_task(send_daily_alert_email)
-
-    # Return immediately so nginx does not wait for the whole search
     return {"detail": "Daily alert email queued"}
 
 # ===== END SECTION: ROOT, HEALTH AND ROUTES =====
@@ -1289,13 +1249,6 @@ def trigger_daily_alert(background_tasks: BackgroundTasks):
 
 @app.post("/search-business")
 def search_business(params: SearchParams, background_tasks: BackgroundTasks):
-    """
-    Main search endpoint.
-
-    One date pair only sync search, returns results immediately.
-    Multiple date pairs always async, returns a jobId and lets the background
-    worker do the heavy lifting so we avoid 504 timeouts.
-    """
     if not DUFFEL_ACCESS_TOKEN:
         return {
             "status": "error",
@@ -1578,7 +1531,6 @@ def duffel_test(
 
 @app.get("/public-config", response_model=PublicConfig)
 def public_config():
-    # Open the UI search window to 2 months by default
     max_window = get_config_int("MAX_DEPARTURE_WINDOW_DAYS", 60)
     max_stay = get_config_int("MAX_STAY_NIGHTS", 30)
     min_stay = get_config_int("MIN_STAY_NIGHTS", 1)
@@ -1689,14 +1641,164 @@ def get_profile(
     )
 
 
-@app.get("/alerts")
+@app.post("/alerts", response_model=AlertOut)
+def create_alert(payload: AlertCreate):
+    """
+    Create a new price alert for a user.
+    Email is taken from the payload so it can work even without authentication.
+    """
+    db = SessionLocal()
+    try:
+        alert_id = str(uuid4())
+        now = datetime.utcnow()
+
+        alert = Alert(
+            id=alert_id,
+            user_email=payload.email,
+            origin=payload.origin,
+            destination=payload.destination,
+            cabin=payload.cabin,
+            departure_start=payload.departure_start,
+            departure_end=payload.departure_end,
+            return_start=payload.return_start,
+            return_end=payload.return_end,
+            alert_type=payload.alert_type,
+            max_price=payload.max_price,
+            last_price=None,
+            last_run_at=None,
+            times_sent=0,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+
+        db.add(alert)
+        db.commit()
+        db.refresh(alert)
+
+        return AlertOut(
+            id=alert.id,
+            email=alert.user_email,
+            origin=alert.origin,
+            destination=alert.destination,
+            cabin=alert.cabin,
+            departure_start=alert.departure_start,
+            departure_end=alert.departure_end,
+            return_start=alert.return_start,
+            return_end=alert.return_end,
+            alert_type=alert.alert_type,
+            max_price=alert.max_price,
+            times_sent=alert.times_sent,
+            is_active=alert.is_active,
+            last_price=alert.last_price,
+            created_at=alert.created_at,
+            updated_at=alert.updated_at,
+        )
+    finally:
+        db.close()
+
+
+@app.get("/alerts", response_model=List[AlertOut])
 def get_alerts(
-    x_user_id: str = Header(..., alias="X-User-Id"),
+    email: Optional[EmailStr] = None,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
 ):
     """
-    Return list of alerts for the current user.
-    For now this returns an empty list so the frontend can integrate safely.
+    Return list of active alerts for a user.
+    Priority:
+      1. email query parameter
+      2. email resolved from X-User-Id via AppUser
     """
-    return []
+    resolved_email: Optional[str] = None
+
+    db = SessionLocal()
+    try:
+        if email is not None:
+            resolved_email = str(email)
+        elif x_user_id:
+            app_user = (
+                db.query(AppUser)
+                .filter(AppUser.external_id == x_user_id)
+                .first()
+            )
+            if app_user and app_user.email:
+                resolved_email = app_user.email
+
+        if not resolved_email:
+            raise HTTPException(
+                status_code=400,
+                detail="Email is required either as query parameter or via an AppUser mapped to X-User-Id",
+            )
+
+        alerts = (
+            db.query(Alert)
+            .filter(Alert.user_email == resolved_email, Alert.is_active == True)  # noqa: E712
+            .order_by(Alert.created_at.desc())
+            .all()
+        )
+
+        return [
+            AlertOut(
+                id=a.id,
+                email=a.user_email,
+                origin=a.origin,
+                destination=a.destination,
+                cabin=a.cabin,
+                departure_start=a.departure_start,
+                departure_end=a.departure_end,
+                return_start=a.return_start,
+                return_end=a.return_end,
+                alert_type=a.alert_type,
+                max_price=a.max_price,
+                times_sent=a.times_sent,
+                is_active=a.is_active,
+                last_price=a.last_price,
+                created_at=a.created_at,
+                updated_at=a.updated_at,
+            )
+            for a in alerts
+        ]
+    finally:
+        db.close()
+
+
+@app.delete("/alerts/{alert_id}")
+def delete_alert(
+    alert_id: str,
+    email: Optional[EmailStr] = None,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    """
+    Soft delete an alert by setting is_active to false.
+    Basic ownership check via email or user id if available.
+    """
+    db = SessionLocal()
+    try:
+        alert = db.query(Alert).filter(Alert.id == alert_id).first()
+        if not alert:
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        resolved_email: Optional[str] = None
+        if email is not None:
+            resolved_email = str(email)
+        elif x_user_id:
+            app_user = (
+                db.query(AppUser)
+                .filter(AppUser.external_id == x_user_id)
+                .first()
+            )
+            if app_user and app_user.email:
+                resolved_email = app_user.email
+
+        if resolved_email and alert.user_email != resolved_email:
+            raise HTTPException(status_code=403, detail="Alert does not belong to this user")
+
+        alert.is_active = False
+        alert.updated_at = datetime.utcnow()
+        db.commit()
+
+        return {"status": "ok", "id": alert_id}
+    finally:
+        db.close()
 
 # ===== END SECTION: PUBLIC CONFIG, USER SYNC, PROFILE, ALERTS =====
