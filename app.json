@@ -2,7 +2,7 @@
   "cron": [
     {
       "command": "curl -s http://localhost:5000/trigger-daily-alert",
-      "schedule": "*/15 * * * *"
+      "schedule": "*/30 * * * *"
     }
   ]
 }
