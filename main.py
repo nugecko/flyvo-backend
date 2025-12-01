@@ -11,7 +11,7 @@ from email.message import EmailMessage
 import requests
 from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from db import engine, Base, SessionLocal
@@ -221,7 +221,7 @@ class PublicConfig(BaseModel):
 
 
 class AlertBase(BaseModel):
-    email: EmailStr
+    email: str
     origin: str
     destination: str
     cabin: str
@@ -1700,7 +1700,7 @@ def create_alert(payload: AlertCreate):
 
 @app.get("/alerts", response_model=List[AlertOut])
 def get_alerts(
-    email: Optional[EmailStr] = None,
+    email: Optional[str] = None,
     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
 ):
     """
@@ -1714,7 +1714,7 @@ def get_alerts(
     db = SessionLocal()
     try:
         if email is not None:
-            resolved_email = str(email)
+            resolved_email = email
         elif x_user_id:
             app_user = (
                 db.query(AppUser)
@@ -1765,7 +1765,7 @@ def get_alerts(
 @app.delete("/alerts/{alert_id}")
 def delete_alert(
     alert_id: str,
-    email: Optional[EmailStr] = None,
+    email: Optional[str] = None,
     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
 ):
     """
@@ -1780,7 +1780,7 @@ def delete_alert(
 
         resolved_email: Optional[str] = None
         if email is not None:
-            resolved_email = str(email)
+            resolved_email = email
         elif x_user_id:
             app_user = (
                 db.query(AppUser)
