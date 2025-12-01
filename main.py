@@ -933,8 +933,8 @@ def run_price_watch() -> Dict[str, Any]:
 
     # Actual scan, may be capped by hard limits
     options = run_duffel_scan(params)
-    
-        # Find the last date pair that actually produced results in this scan
+
+    # Find the last date pair that actually produced results in this scan
     scanned_pairs: List[Tuple[str, str]] = sorted(
         {(opt.departureDate, opt.returnDate) for opt in options}
     )
@@ -1193,7 +1193,7 @@ def send_daily_alert_email() -> None:
         dep_label = dep_dt.strftime("%d %b")
         ret_label = ret_dt.strftime("%d %b")
 
-                status = p["status"]
+        status = p["status"]
         total_flights = p.get("totalFlights") or 0
         min_price = p.get("minPrice")
         max_price = p.get("maxPrice")
@@ -1493,7 +1493,7 @@ def config_debug(
     if received != expected:
         raise HTTPException(status_code=401, detail="Invalid admin token")
 
-        return {
+    return {
         "MAX_OFFERS_TOTAL": get_config_int("MAX_OFFERS_TOTAL", 4000),
         "MAX_OFFERS_PER_PAIR": get_config_int("MAX_OFFERS_PER_PAIR", 80),
         "MAX_DATE_PAIRS": get_config_int("MAX_DATE_PAIRS", 60),
