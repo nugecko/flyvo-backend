@@ -1193,13 +1193,15 @@ def send_daily_alert_email() -> None:
         dep_label = dep_dt.strftime("%d %b")
         ret_label = ret_dt.strftime("%d %b")
 
-        status = p["status"]
+                status = p["status"]
         total_flights = p.get("totalFlights") or 0
         min_price = p.get("minPrice")
         max_price = p.get("maxPrice")
 
         if status == "no_data":
-            note = "no flights returned"
+            # No options were stored for this date pair in this scan,
+            # usually due to an API timeout or hitting a cap.
+            note = "no data captured in this scan"
         elif total_flights == 0 or min_price is None or max_price is None:
             note = "no flights returned"
         else:
