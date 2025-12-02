@@ -225,6 +225,16 @@ class PublicConfig(BaseModel):
     maxPassengers: int
 
 
+class AlertUpdatePayload(BaseModel):
+    alert_type: Optional[str] = None
+    max_price: Optional[int] = None
+    is_active: Optional[bool] = None
+    departure_start: Optional[date] = None
+    departure_end: Optional[date] = None
+    return_start: Optional[date] = None
+    return_end: Optional[date] = None
+
+
 class AlertBase(BaseModel):
     email: str
     origin: str
@@ -461,7 +471,6 @@ def map_duffel_offer_to_option(
     origin_airport = None
     destination_airport = None
 
-    # Determine overall origin and destination from outbound segments
     if outbound_segments_json:
         first_segment = outbound_segments_json[0]
         last_segment = outbound_segments_json[-1]
@@ -474,7 +483,6 @@ def map_duffel_offer_to_option(
         origin_airport = origin_obj.get("name")
         destination_airport = dest_obj.get("name")
 
-    # Per segment arrays and total minutes
     outbound_segments_info: List[Dict[str, Any]] = []
     return_segments_info: List[Dict[str, Any]] = []
     aircraft_codes: List[str] = []
@@ -487,12 +495,10 @@ def map_duffel_offer_to_option(
         if not dt_str:
             return None
         try:
-            # Duffel uses Z suffix for UTC
             return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
         except Exception:
             return None
 
-    # Helper to process a list of segments for one direction
     def process_segment_list(direction: str, seg_list: List[dict]) -> Tuple[List[Dict[str, Any]], int]:
         result: List[Dict[str, Any]] = []
         total_minutes = 0
@@ -536,7 +542,6 @@ def map_duffel_offer_to_option(
                         layover_minutes_to_next = None
 
             if duration_minutes_seg is None:
-                # If we fail to parse, treat as zero for totals
                 duration_minutes_seg = 0
 
             total_minutes_local = duration_minutes_seg
@@ -560,14 +565,11 @@ def map_duffel_offer_to_option(
 
         return result, total_minutes
 
-    # Process outbound and return segments separately
     outbound_segments_info, outbound_total_minutes = process_segment_list("outbound", outbound_segments_json)
     return_segments_info, return_total_minutes = process_segment_list("return", return_segments_json)
 
-    # Outbound duration for the card
     duration_minutes = outbound_total_minutes
 
-    # Total duration if both legs available
     if outbound_total_minutes or return_total_minutes:
         total_duration_minutes = outbound_total_minutes + return_total_minutes
     else:
@@ -575,7 +577,6 @@ def map_duffel_offer_to_option(
 
     iso_duration = build_iso_duration(duration_minutes)
 
-    # Stopover codes and names from outbound segments only
     stopover_codes: List[str] = []
     stopover_airports: List[str] = []
     if len(outbound_segments_json) > 1:
@@ -1083,6 +1084,7 @@ def run_price_watch() -> Dict[str, Any]:
 
 # ===== END SECTION: PRICE WATCH HELPERS =====
 
+
 # =======================================
 # SECTION: ALERT ENGINE HELPERS
 # =======================================
@@ -1090,7 +1092,7 @@ def run_price_watch() -> Dict[str, Any]:
 def build_search_params_for_alert(alert: Alert) -> SearchParams:
     """
     Convert an Alert DB row into SearchParams for Duffel.
-    Uses departure_start / departure_end as the departure window
+    Uses departure_start and departure_end as the departure window
     and infers a stay range from the return dates if available.
     """
     dep_start = alert.departure_start
@@ -1158,7 +1160,7 @@ def send_alert_email_for_alert(alert: Alert, cheapest: FlightOption, params: Sea
         f"with {cheapest.airline} ({cheapest.airlineCode or ''})"
     )
     lines.append("")
-    lines.append(f"View this date pair in Flyyv:")
+    lines.append("View this date pair in Flyyv:")
     lines.append(f"{flyyv_link}")
     lines.append("")
     lines.append("You are receiving this because you created a Flyyv price alert.")
@@ -1376,7 +1378,7 @@ def send_daily_alert_email() -> None:
             cheapest_airline = p["cheapestAirline"]
             total_flights = p.get("totalFlights") or 0
             min_price = p.get("minPrice")
-            max_price = p.get("maxPrice")
+            max_price = p.get("MaxPrice") if "MaxPrice" in p else p.get("maxPrice")
 
             if cheapest_price is None or cheapest_airline is None:
                 continue
@@ -1427,7 +1429,7 @@ def send_daily_alert_email() -> None:
         status = p["status"]
         total_flights = p.get("totalFlights") or 0
         min_price = p.get("minPrice")
-        max_price = p.get("maxPrice")
+        max_price = p.get("MaxPrice") if "MaxPrice" in p else p.get("maxPrice")
 
         if status == "no_data":
             note = "no data captured in this scan"
@@ -1493,8 +1495,9 @@ def trigger_daily_alert(background_tasks: BackgroundTasks):
     if not ALERTS_ENABLED:
         return {"detail": "Alerts are currently disabled"}
 
-    background_tasks.add_task(send_daily_alert_email)
-    return {"detail": "Daily alert email queued"}
+    # For live user alerts we now use run_all_alerts_cycle, not the single watch
+    background_tasks.add_task(run_all_alerts_cycle)
+    return {"detail": "Alerts cycle queued"}
 
 # ===== END SECTION: ROOT, HEALTH AND ROUTES =====
 
@@ -2014,6 +2017,151 @@ def get_alerts(
             )
             for a in alerts
         ]
+    finally:
+        db.close()
+
+
+@app.patch("/alerts/{alert_id}")
+def update_alert(
+    alert_id: str,
+    payload: AlertUpdatePayload,
+    email: Optional[str] = None,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    """
+    General alert update endpoint.
+    Supports updating alert_type, max_price and date windows.
+    Used by Base44 to adjust alert frequency and settings.
+    """
+    db = SessionLocal()
+    try:
+        resolved_email: Optional[str] = None
+        if email is not None:
+            resolved_email = email
+        elif x_user_id:
+            app_user = (
+                db.query(AppUser)
+                .filter(AppUser.external_id == x_user_id)
+                .first()
+            )
+            if app_user and app_user.email:
+                resolved_email = app_user.email
+
+        if not resolved_email:
+            raise HTTPException(
+                status_code=400,
+                detail="Email is required either as query parameter or via an AppUser mapped to X-User-Id",
+            )
+
+        alert = (
+            db.query(Alert)
+            .filter(Alert.id == alert_id)
+            .filter(Alert.user_email == resolved_email)
+            .first()
+        )
+        if not alert:
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        if payload.alert_type is not None:
+            alert.alert_type = payload.alert_type
+
+        if payload.max_price is not None:
+            alert.max_price = payload.max_price
+
+        if payload.is_active is not None:
+            alert.is_active = payload.is_active
+
+        if payload.departure_start is not None:
+            alert.departure_start = payload.departure_start
+
+        if payload.departure_end is not None:
+            alert.departure_end = payload.departure_end
+
+        if payload.return_start is not None:
+            alert.return_start = payload.return_start
+
+        if payload.return_end is not None:
+            alert.return_end = payload.return_end
+
+        alert.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(alert)
+
+        return {
+            "status": "ok",
+            "alert": AlertOut(
+                id=alert.id,
+                email=alert.user_email,
+                origin=alert.origin,
+                destination=alert.destination,
+                cabin=alert.cabin,
+                departure_start=alert.departure_start,
+                departure_end=alert.departure_end,
+                return_start=alert.return_start,
+                return_end=alert.return_end,
+                alert_type=alert.alert_type,
+                max_price=alert.max_price,
+                times_sent=alert.times_sent,
+                is_active=alert.is_active,
+                last_price=alert.last_price,
+                created_at=alert.created_at,
+                updated_at=alert.updated_at,
+            ),
+        }
+    finally:
+        db.close()
+
+
+@app.patch("/alerts/{alert_id}/status")
+def update_alert_status(
+    alert_id: str,
+    is_active: bool,
+    email: Optional[str] = None,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    """
+    Simple status toggle endpoint.
+    Matches what Base44 is already wired to call for the bell icon.
+    """
+    db = SessionLocal()
+    try:
+        resolved_email: Optional[str] = None
+        if email is not None:
+            resolved_email = email
+        elif x_user_id:
+            app_user = (
+                db.query(AppUser)
+                .filter(AppUser.external_id == x_user_id)
+                .first()
+            )
+            if app_user and app_user.email:
+                resolved_email = app_user.email
+
+        if not resolved_email:
+            raise HTTPException(
+                status_code=400,
+                detail="Email is required either as query parameter or via an AppUser mapped to X-User-Id",
+            )
+
+        alert = (
+            db.query(Alert)
+            .filter(Alert.id == alert_id)
+            .filter(Alert.user_email == resolved_email)
+            .first()
+        )
+        if not alert:
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        alert.is_active = is_active
+        alert.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(alert)
+
+        return {
+            "status": "ok",
+            "id": alert.id,
+            "is_active": alert.is_active,
+        }
     finally:
         db.close()
 
