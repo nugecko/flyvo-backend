@@ -19,6 +19,61 @@ import models  # noqa: F401
 from models import AdminConfig, AppUser, Alert, AlertRun
 
 # =======================================
+# SECTION: ALERT TOGGLES
+# =======================================
+
+def master_alerts_enabled() -> bool:
+    """
+    Hard master switch controlled by environment variable ALERTS_ENABLED.
+    If this is set to 'false' (case insensitive), alerts are completely disabled.
+    """
+    value = os.getenv("ALERTS_ENABLED", "true")
+    return value.lower() == "true"
+
+
+def alerts_globally_enabled(db: Session) -> bool:
+    """
+    Global switch stored in admin_config with key = 'GLOBAL_ALERTS'.
+    If the row does not exist, default to True.
+    """
+    config = (
+        db.query(AdminConfig)
+        .filter(AdminConfig.key == "GLOBAL_ALERTS")
+        .first()
+    )
+    if not config:
+        return True
+    # if the column is missing for any reason, also default to True
+    if not hasattr(config, "alerts_enabled"):
+        return True
+    return bool(config.alerts_enabled)
+
+
+def user_allows_alerts(user: AppUser) -> bool:
+    """
+    Per user toggle, defaults to True if the column is missing.
+    """
+    if not hasattr(user, "email_alerts_enabled"):
+        return True
+    return bool(user.email_alerts_enabled)
+
+
+def should_send_alert(db: Session, user: AppUser) -> bool:
+    """
+    Combined logic:
+    1. Environment master toggle must be ON
+    2. Global admin_config toggle must be ON
+    3. User toggle must be ON
+    """
+    if not master_alerts_enabled():
+        return False
+    if not alerts_globally_enabled(db):
+        return False
+    if not user_allows_alerts(user):
+        return False
+    return True
+
+# =======================================
 # SECTION: AIRLINES IMPORTS
 # =======================================
 
