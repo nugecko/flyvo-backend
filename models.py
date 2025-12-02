@@ -21,6 +21,9 @@ class AdminConfig(Base):
     value = Column(String(255), nullable=True)
     description = Column(String(255), nullable=True)
 
+    # Global master switch for alerts
+    alerts_enabled = Column(Boolean, nullable=False, default=True)
+
 
 class AppUser(Base):
     __tablename__ = "app_users"
@@ -36,6 +39,9 @@ class AppUser(Base):
 
     marketing_consent = Column(Boolean, default=None)
     source = Column(String(50), nullable=True)
+
+    # Per user alerts switch
+    email_alerts_enabled = Column(Boolean, nullable=False, default=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(
