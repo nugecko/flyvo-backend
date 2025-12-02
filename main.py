@@ -74,6 +74,24 @@ def get_config_int(key: str, default_value: int) -> int:
     except ValueError:
         return default_value
 
+
+def get_config_bool(key: str, default_value: bool) -> bool:
+    """
+    Read a config value from admin_config and cast to bool.
+    Accepts values like 1, 0, true, false, yes, no, on, off.
+    Falls back to default_value if missing or invalid.
+    """
+    raw = get_config_str(key, None)
+    if raw is None:
+        return default_value
+
+    s = str(raw).strip().lower()
+    if s in ("1", "true", "yes", "y", "on"):
+        return True
+    if s in ("0", "false", "no", "n", "off"):
+        return False
+    return default_value
+
 # ===== END SECTION: ADMIN CONFIG HELPERS =====
 
 
@@ -327,6 +345,7 @@ WATCH_END_DATE = os.getenv("WATCH_END_DATE")
 WATCH_STAY_NIGHTS = int(os.getenv("WATCH_STAY_NIGHTS", "7"))
 WATCH_MAX_PRICE = float(os.getenv("WATCH_MAX_PRICE", "720"))
 
+# Environment level hard kill switch
 ALERTS_ENABLED = os.getenv("ALERTS_ENABLED", "true").lower() == "true"
 
 # ===== END SECTION: ENV, DUFFEL AND EMAIL CONFIG =====
@@ -906,7 +925,7 @@ def run_search_job(job_id: str):
 
                     if total_count >= max_offers_total:
                         print(f"[JOB {job_id}] Reached max_offers_total={max_offers_total}, stopping")
-                        break
+                       	break
 
                 if total_count >= max_offers_total:
                     break
@@ -1492,8 +1511,14 @@ def test_email_alert():
 
 @app.get("/trigger-daily-alert")
 def trigger_daily_alert(background_tasks: BackgroundTasks):
+    # Environment level kill switch
     if not ALERTS_ENABLED:
-        return {"detail": "Alerts are currently disabled"}
+        return {"detail": "Alerts are currently disabled via environment"}
+
+    # System level kill switch controlled from Directus admin_config
+    system_enabled = get_config_bool("ALERTS_SYSTEM_ENABLED", True)
+    if not system_enabled:
+        return {"detail": "Alerts are currently disabled in admin config"}
 
     # For live user alerts we now use run_all_alerts_cycle, not the single watch
     background_tasks.add_task(run_all_alerts_cycle)
@@ -1723,6 +1748,8 @@ def config_debug(
         "MAX_DATE_PAIRS_HARD": MAX_DATE_PAIRS_HARD,
         "PARALLEL_WORKERS": get_config_int("PARALLEL_WORKERS", PARALLEL_WORKERS),
         "MAX_AIRLINE_SHARE_PERCENT": get_config_int("MAX_AIRLINE_SHARE_PERCENT", 40),
+        "ALERTS_SYSTEM_ENABLED": get_config_bool("ALERTS_SYSTEM_ENABLED", True),
+        "ALERTS_ENABLED_ENV": ALERTS_ENABLED,
     }
 
 # ===== END SECTION: CONFIG DEBUG ENDPOINT =====
