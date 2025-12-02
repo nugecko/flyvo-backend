@@ -772,7 +772,7 @@ def run_duffel_scan(params: SearchParams) -> List[FlightOption]:
             collected_offers.append((offer, dep, ret))
             total_count += 1
             if total_count >= max_offers_total:
-                break
+            break
 
     mapped: List[FlightOption] = [
         map_duffel_offer_to_option(offer, dep, ret)
@@ -1926,6 +1926,116 @@ def get_profile(
         wallet=wallet,
     )
 
+# ===== BEGIN: LATEST ALERT RUN ENDPOINT =====
+
+@app.get("/alerts/{alert_id}/latest-run")
+def get_latest_alert_run(
+    alert_id: str,
+    email: Optional[str] = None,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    """
+    Return the most recent AlertRun for a given alert.
+    Uses existing Alert and AlertRun fields so no DB migration is needed.
+    """
+
+    db = SessionLocal()
+    try:
+        # Resolve user email for ownership check
+        resolved_email: Optional[str] = None
+        if email is not None:
+            resolved_email = email
+        elif x_user_id:
+            app_user = (
+                db.query(AppUser)
+                .filter(AppUser.external_id == x_user_id)
+                .first()
+            )
+            if app_user and app_user.email:
+                resolved_email = app_user.email
+
+        if not resolved_email:
+            raise HTTPException(
+                status_code=400,
+                detail="Email is required either as query parameter or via an AppUser mapped to X-User-Id",
+            )
+
+        # Fetch alert owned by this user
+        alert = (
+            db.query(Alert)
+            .filter(Alert.id == alert_id)
+            .filter(Alert.user_email == resolved_email)
+            .first()
+        )
+        if not alert:
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        # Fetch latest run for this alert
+        latest_run = (
+            db.query(AlertRun)
+            .filter(AlertRun.alert_id == alert.id)
+            .order_by(AlertRun.run_at.desc())
+            .first()
+        )
+
+        base_alert_payload = {
+            "origin": alert.origin,
+            "destination": alert.destination,
+            "cabin": alert.cabin,
+            "alertType": alert.alert_type,
+            "maxPrice": alert.max_price,
+            "isActive": alert.is_active,
+            "timesSentTotal": alert.times_sent,
+            "lastPriceStored": alert.last_price,
+            "departureStart": alert.departure_start.isoformat(),
+            "departureEnd": alert.departure_end.isoformat(),
+            "returnStart": alert.return_start.isoformat() if alert.return_start else None,
+            "returnEnd": alert.return_end.isoformat() if alert.return_end else None,
+        }
+
+        # No runs yet
+        if not latest_run:
+            return {
+                "alertId": alert.id,
+                "hasRun": False,
+                "alert": base_alert_payload,
+                "run": None,
+            }
+
+        # Build summary text for the UI card
+        price_part = (
+            f"£{latest_run.price_found}"
+            if latest_run.price_found is not None
+            else "no price captured"
+        )
+        reason_part = latest_run.reason or "no reason stored"
+
+        summary_text = (
+            f"Route: {alert.origin} \u2192 {alert.destination}, "
+            f"{alert.cabin.title()} class, "
+            f"last run at {latest_run.run_at.isoformat()}, "
+            f"latest price {price_part}, reason: {reason_part}"
+        )
+
+        return {
+            "alertId": alert.id,
+            "hasRun": True,
+            "alert": base_alert_payload,
+            "run": {
+                "runId": latest_run.id,
+                "runAt": latest_run.run_at.isoformat(),
+                "emailSent": latest_run.sent,
+                "sendReason": latest_run.reason,
+                "priceFound": latest_run.price_found,
+                "currency": "GBP",
+                "summaryText": summary_text,
+            },
+        }
+    finally:
+        db.close()
+
+# ===== END: LATEST ALERT RUN ENDPOINT =====
+
 
 @app.post("/alerts", response_model=AlertOut)
 def create_alert(payload: AlertCreate):
@@ -2046,6 +2156,7 @@ def get_alerts(
         ]
     finally:
         db.close()
+
 
 
 @app.patch("/alerts/{alert_id}")
