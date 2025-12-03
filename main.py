@@ -1574,13 +1574,13 @@ def process_alert(alert: Alert, db: Session) -> None:
         should_send = True
         send_reason = f"unknown_type_{alert.alert_type}"
 
-    print(
+        print(
         f"[alerts] process_alert DECISION id={alert.id} "
         f"should_send={should_send} reason={send_reason} "
         f"current_price={current_price} last_price={alert.last_price} mode={alert.mode}"
     )
 
-        sent_flag = False
+    sent_flag = False
 
     if should_send:
         try:
