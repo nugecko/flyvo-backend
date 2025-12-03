@@ -1402,61 +1402,62 @@ def send_smart_alert_email(alert: Alert, options: List[FlightOption], params: Se
 
     lines.append(f"Date window: {start_label} to {end_label}")
     lines.append("")
-    lines.append("We scanned many date combinations in this window and summarised the results for you.")
+        lines.append(f"Date window: {start_label} to {end_label}")
     lines.append("")
 
-    # Deals under threshold section
+    # Short intro
     if threshold is not None:
-        if any_under:
-            lines.append(f"Deals found under your £{int(threshold)} limit:")
-            lines.append("")
-            for p in pairs_summary:
-                if p["flightsUnderThresholdCount"] <= 0:
-                    continue
-
-                dep_dt = datetime.fromisoformat(p["departureDate"])
-                ret_dt = datetime.fromisoformat(p["returnDate"])
-                dep_label = dep_dt.strftime("%d %b")
-                ret_label = ret_dt.strftime("%d %b")
-
-                lines.append(
-                    f"{dep_label} \u2192 {ret_label}: "
-                    f"{p['totalFlights']} flights, "
-                    f"range £{int(p['minPrice'])} to £{int(p['maxPrice'])}, "
-                    f"cheapest £{int(p['cheapestPrice'])} with {p['cheapestAirline']}"
-                )
-                if p["flyyvLink"]:
-                    lines.append(f"  View in Flyyv: {p['flyyvLink']}")
-                lines.append("")
-        else:
-            lines.append(
-                f"No fares under £{int(threshold)} were found for any watched dates in this scan."
-            )
-            lines.append("")
-
-    # Summary of all watched dates
-    lines.append("Summary of all watched dates:")
+        lines.append(f"Max: £{int(threshold)}, 1 pax, {nights_label}")
+    else:
+        lines.append(f"Trip details: 1 pax, {nights_label}")
+    lines.append("")
+    lines.append("We scanned many date combinations in this window and picked the best options for you.")
     lines.append("")
 
+    # Build list of candidate pairs
+    top_pairs = []
     for p in pairs_summary:
-        dep_dt = datetime.fromisoformat(p["departureDate"])
-        ret_dt = datetime.fromisoformat(p["returnDate"])
-        dep_label = dep_dt.strftime("%d %b")
-        ret_label = ret_dt.strftime("%d %b")
+        if p.get("totalFlights", 0) <= 0:
+            continue
+        if p.get("cheapestPrice") is None:
+            continue
+        top_pairs.append(p)
 
-        if p["totalFlights"] == 0:
-            note = "no flights returned"
-        else:
-            note = (
-                f"{p['totalFlights']} flights, "
-                f"range £{int(p['minPrice'])} to £{int(p['maxPrice'])}"
+    if not top_pairs:
+        lines.append("No flights were found in this window in the latest scan.")
+    else:
+        MAX_RESULTS = 10
+        top_pairs_sorted = sorted(
+            top_pairs,
+            key=lambda x: x["cheapestPrice"],
+        )[:MAX_RESULTS]
+
+        lines.append("Top flight deals in your window:")
+        lines.append("")
+
+        for p in top_pairs_sorted:
+            dep_dt = datetime.fromisoformat(p["departureDate"])
+            ret_dt = datetime.fromisoformat(p["returnDate"])
+            dep_label = dep_dt.strftime("%d %b")
+            ret_label = ret_dt.strftime("%d %b")
+            nights = (ret_dt - dep_dt).days
+
+            price_label = int(p["cheapestPrice"])
+            airline_label = p.get("cheapestAirline") or "Multiple airlines"
+
+            line = (
+                f"£{price_label}, {dep_label} \u2192 {ret_label}, "
+                f"{airline_label}, {nights} nights"
             )
 
-        if threshold is not None and p["flightsUnderThresholdCount"] > 0:
-            note += f", {p['flightsUnderThresholdCount']} under £{int(threshold)}"
+            if threshold is not None and float(price_label) <= float(threshold):
+                line += "  (within your limit)"
 
-        lines.append(f"{dep_label} \u2192 {ret_label}: {note}")
+            lines.append(line)
 
+    lines.append("")
+    lines.append("View all your alerts:")
+    lines.append("https://flyyv.com")
     lines.append("")
     lines.append("You are receiving this because you created a Flyyv smart price alert.")
     lines.append("To stop these alerts, delete the alert in your Flyyv profile.")
@@ -1473,7 +1474,6 @@ def send_smart_alert_email(alert: Alert, options: List[FlightOption], params: Se
         server.starttls()
         server.login(SMTP_USERNAME, SMTP_PASSWORD)
         server.send_message(msg)
-
 
 def process_alert(alert: Alert, db: Session) -> None:
     now = datetime.utcnow()
