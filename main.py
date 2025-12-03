@@ -302,6 +302,8 @@ class AlertUpdatePayload(BaseModel):
     departure_end: Optional[date] = None
     return_start: Optional[date] = None
     return_end: Optional[date] = None
+    # We will later use this to migrate alerts between single and smart
+    mode: Optional[str] = None
 
 
 class AlertStatusPayload(BaseModel):
@@ -323,6 +325,10 @@ class AlertBase(BaseModel):
     alert_type: str
     max_price: Optional[int] = None
 
+    # single = specific date pair
+    # smart  = smart search / date window
+    mode: Optional[str] = "single"
+
 
 class AlertCreate(AlertBase):
     pass
@@ -340,6 +346,7 @@ class AlertOut(AlertBase):
         orm_mode = True
 
 # ===== END SECTION: Pydantic MODELS =====
+
 
 
 # =======================================
