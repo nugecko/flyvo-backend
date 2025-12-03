@@ -1273,7 +1273,7 @@ def send_alert_email_for_alert(alert: Alert, cheapest: FlightOption, params: Sea
     dep_label = cheapest.departureDate
     ret_label = cheapest.returnDate
 
-    lines: List[str] = []
+        lines: List[str] = []
 
     lines.append(
         f"Route: {alert.origin} \u2192 {alert.destination}, {alert.cabin.title()} class"
@@ -1285,8 +1285,8 @@ def send_alert_email_for_alert(alert: Alert, cheapest: FlightOption, params: Sea
         f"with {cheapest.airline} ({cheapest.airlineCode or ''})"
     )
     lines.append("")
-    lines.append("View this date pair in Flyyv:")
-    lines.append(f"{flyyv_link}")
+    lines.append("To view this alert and explore more dates, go to your Flyyv dashboard:")
+    lines.append("https://flyyv.com")
     lines.append("")
     lines.append("You are receiving this because you created a Flyyv price alert.")
     lines.append("To stop these alerts, delete the alert in your Flyyv profile.")
