@@ -1234,8 +1234,6 @@ def build_search_params_for_alert(alert: Alert) -> SearchParams:
         min_stay = 1
         max_stay = 21
 
-    # Alerts should be lighter than full user searches
-    # so we deliberately cap the offer counts here.
     return SearchParams(
         origin=alert.origin,
         destination=alert.destination,
@@ -1247,8 +1245,6 @@ def build_search_params_for_alert(alert: Alert) -> SearchParams:
         cabin=alert.cabin or "BUSINESS",
         passengers=1,
         stopsFilter=None,
-        maxOffersPerPair=60,
-        maxOffersTotal=300,
     )
 
 
@@ -1313,13 +1309,13 @@ def process_alert(alert: Alert, db: Session) -> None:
     now = datetime.utcnow()
     print(
         f"[alerts] process_alert START id={alert.id} "
-        f"email={alert.user_email} type={alert.alert_type}"
+        f"email={alert.user_email} type={alert.alert_type} mode={alert.mode}"
     )
 
     # Find the user for this alert
     user = db.query(AppUser).filter(AppUser.email == alert.user_email).first()
 
-    # If the user no longer exists
+    # If there is no user, record and skip
     if not user:
         print(f"[alerts] process_alert SKIP id={alert.id} reason=no_user_for_alert")
         run_row = AlertRun(
@@ -1337,7 +1333,7 @@ def process_alert(alert: Alert, db: Session) -> None:
         db.commit()
         return
 
-    # Check global and per user switches
+    # Check master, global and per user switches
     if not should_send_alert(db, user):
         print(f"[alerts] process_alert SKIP id={alert.id} reason=alerts_disabled")
         run_row = AlertRun(
@@ -1355,12 +1351,14 @@ def process_alert(alert: Alert, db: Session) -> None:
         db.commit()
         return
 
+    # For now, both modes share the same search behaviour
     params = build_search_params_for_alert(alert)
+    max_pairs, max_offers_pair, max_offers_total = effective_caps(params)
     print(
         f"[alerts] process_alert SEARCH id={alert.id} "
         f"origin={params.origin} dest={params.destination} "
         f"dep_window={params.earliestDeparture}..{params.latestDeparture} "
-        f"caps={params.maxOffersPerPair}/{params.maxOffersTotal}"
+        f"mode={alert.mode} caps={max_pairs}/{max_offers_total}"
     )
 
     options = run_duffel_scan(params)
@@ -1409,16 +1407,18 @@ def process_alert(alert: Alert, db: Session) -> None:
     print(
         f"[alerts] process_alert DECISION id={alert.id} "
         f"should_send={should_send} reason={send_reason} "
-        f"current_price={current_price} last_price={alert.last_price}"
+        f"current_price={current_price} last_price={alert.last_price} mode={alert.mode}"
     )
 
     sent_flag = False
 
     if should_send:
         try:
+            # For now, even smart alerts use the single date email, later we will
+            # teach this branch to call a smart summary email builder instead.
             send_alert_email_for_alert(alert, cheapest, params)
             sent_flag = True
-            print(f"[alerts] process_alert EMAIL_SENT id={alert.id}")
+            print(f"[alerts] process_alert EMAIL_SENT id={alert.id} mode={alert.mode}")
         except Exception as e:
             print(f"[alerts] Failed to send email for alert {alert.id}: {e}")
             sent_flag = False
@@ -1444,7 +1444,7 @@ def process_alert(alert: Alert, db: Session) -> None:
 
     print(
         f"[alerts] process_alert DONE id={alert.id} "
-        f"sent={sent_flag} reason={send_reason} price={current_price}"
+        f"sent={sent_flag} reason={send_reason} price={current_price} mode={alert.mode}"
     )
 
 
@@ -1464,17 +1464,18 @@ def run_all_alerts_cycle() -> None:
 
     db = SessionLocal()
     try:
+        # Global switch from admin_config
         if not alerts_globally_enabled(db):
             print("[alerts] Global alerts disabled in admin_config, skipping alerts cycle")
             return
 
-        alerts = db.query(Alert).filter(Alert.is_active == True).all()
+        alerts = db.query(Alert).filter(Alert.is_active == True).all()  # noqa: E712
         print(f"[alerts] Running alerts cycle for {len(alerts)} alerts")
 
         for alert in alerts:
             print(
                 f"[alerts] CYCLE processing alert id={alert.id} "
-                f"email={alert.user_email}"
+                f"email={alert.user_email} mode={alert.mode}"
             )
             try:
                 process_alert(alert, db)
