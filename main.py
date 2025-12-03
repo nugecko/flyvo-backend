@@ -1247,12 +1247,17 @@ def send_alert_email_for_alert(alert: Alert, cheapest: FlightOption, params: Sea
 
 def process_alert(alert: Alert, db: Session) -> None:
     now = datetime.utcnow()
+    print(
+        f"[alerts] process_alert START id={alert.id} "
+        f"email={alert.user_email} type={alert.alert_type}"
+    )
 
     # Find the user for this alert
     user = db.query(AppUser).filter(AppUser.email == alert.user_email).first()
 
-    # If there is no user, record and skip
+    # If the user no longer exists
     if not user:
+        print(f"[alerts] process_alert SKIP id={alert.id} reason=no_user_for_alert")
         run_row = AlertRun(
             id=str(uuid4()),
             alert_id=alert.id,
@@ -1268,8 +1273,9 @@ def process_alert(alert: Alert, db: Session) -> None:
         db.commit()
         return
 
-    # Check master, global and per user switches
+    # Check global and per user switches
     if not should_send_alert(db, user):
+        print(f"[alerts] process_alert SKIP id={alert.id} reason=alerts_disabled")
         run_row = AlertRun(
             id=str(uuid4()),
             alert_id=alert.id,
@@ -1286,10 +1292,16 @@ def process_alert(alert: Alert, db: Session) -> None:
         return
 
     params = build_search_params_for_alert(alert)
+    print(
+        f"[alerts] process_alert SEARCH id={alert.id} "
+        f"origin={params.origin} dest={params.destination} "
+        f"dep_window={params.earliestDeparture}..{params.latestDeparture}"
+    )
 
     options = run_duffel_scan(params)
 
     if not options:
+        print(f"[alerts] process_alert NO_RESULTS id={alert.id}")
         run_row = AlertRun(
             id=str(uuid4()),
             alert_id=alert.id,
@@ -1329,12 +1341,19 @@ def process_alert(alert: Alert, db: Session) -> None:
         should_send = True
         send_reason = f"unknown_type_{alert.alert_type}"
 
+    print(
+        f"[alerts] process_alert DECISION id={alert.id} "
+        f"should_send={should_send} reason={send_reason} "
+        f"current_price={current_price} last_price={alert.last_price}"
+    )
+
     sent_flag = False
 
     if should_send:
         try:
             send_alert_email_for_alert(alert, cheapest, params)
             sent_flag = True
+            print(f"[alerts] process_alert EMAIL_SENT id={alert.id}")
         except Exception as e:
             print(f"[alerts] Failed to send email for alert {alert.id}: {e}")
             sent_flag = False
@@ -1358,6 +1377,11 @@ def process_alert(alert: Alert, db: Session) -> None:
 
     db.commit()
 
+    print(
+        f"[alerts] process_alert DONE id={alert.id} "
+        f"sent={sent_flag} reason={send_reason} price={current_price}"
+    )
+
 
 def run_all_alerts_cycle() -> None:
     # Hard master switch from environment
@@ -1375,15 +1399,18 @@ def run_all_alerts_cycle() -> None:
 
     db = SessionLocal()
     try:
-        # Global switch from admin_config
         if not alerts_globally_enabled(db):
             print("[alerts] Global alerts disabled in admin_config, skipping alerts cycle")
             return
 
-        alerts = db.query(Alert).filter(Alert.is_active == True).all()  # noqa: E712
+        alerts = db.query(Alert).filter(Alert.is_active == True).all()
         print(f"[alerts] Running alerts cycle for {len(alerts)} alerts")
 
         for alert in alerts:
+            print(
+                f"[alerts] CYCLE processing alert id={alert.id} "
+                f"email={alert.user_email}"
+            )
             try:
                 process_alert(alert, db)
             except Exception as e:
@@ -1392,7 +1419,6 @@ def run_all_alerts_cycle() -> None:
         db.close()
 
 # ===== END SECTION: ALERT ENGINE HELPERS =====
-
 
 # =======================================
 # SECTION: EMAIL HELPERS
