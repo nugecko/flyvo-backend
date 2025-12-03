@@ -1249,7 +1249,7 @@ def build_search_params_for_alert(alert: Alert) -> SearchParams:
 
 
 def send_alert_email_for_alert(alert: Alert, cheapest: FlightOption, params: SearchParams) -> None:
-    if not (SMTP_USERNAME and SMTP_PASSWORD):
+    if not (SMTP_USERNAME and SMTP_PASSWORD and ALERT_FROM_EMAIL):
         raise HTTPException(
             status_code=500,
             detail="SMTP settings are not fully configured on the server",
@@ -1289,6 +1289,177 @@ def send_alert_email_for_alert(alert: Alert, cheapest: FlightOption, params: Sea
     lines.append(f"{flyyv_link}")
     lines.append("")
     lines.append("You are receiving this because you created a Flyyv price alert.")
+    lines.append("To stop these alerts, delete the alert in your Flyyv profile.")
+
+    body = "\n".join(lines)
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = ALERT_FROM_EMAIL
+    msg["To"] = to_email
+    msg.set_content(body)
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        server.starttls()
+        server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        server.send_message(msg)
+
+
+def send_smart_alert_email(alert: Alert, options: List[FlightOption], params: SearchParams) -> None:
+    """
+    Build a Smart Search style summary email over many date pairs.
+    Uses the same Duffel options list that process_alert already fetched.
+    """
+    if not (SMTP_USERNAME and SMTP_PASSWORD and ALERT_FROM_EMAIL):
+        raise HTTPException(
+            status_code=500,
+            detail="SMTP settings are not fully configured on the server",
+        )
+
+    to_email = alert.user_email
+    if not to_email:
+        raise HTTPException(status_code=500, detail="Alert has no user_email")
+
+    threshold = alert.max_price
+    origin = alert.origin
+    destination = alert.destination
+
+    # Group options by (departureDate, returnDate)
+    grouped: Dict[Tuple[str, str], List[FlightOption]] = {}
+    for opt in options:
+        key = (opt.departureDate, opt.returnDate)
+        grouped.setdefault(key, []).append(opt)
+
+    # Sort pairs by departure then return
+    sorted_keys = sorted(grouped.keys())
+
+    any_under = False
+    pairs_summary: List[Dict[str, Any]] = []
+
+    for dep_iso, ret_iso in sorted_keys:
+        flights = grouped[(dep_iso, ret_iso)]
+        prices = [o.price for o in flights]
+        if not prices:
+            continue
+
+        min_price = min(prices)
+        max_price = max(prices)
+        cheapest = min(flights, key=lambda o: o.price)
+
+        flights_under: List[FlightOption] = []
+        if threshold is not None:
+            flights_under = [o for o in flights if o.price <= float(threshold)]
+            if flights_under:
+                any_under = True
+
+        flyyv_link = build_flyyv_link(params, dep_iso, ret_iso)
+
+        pairs_summary.append(
+            {
+                "departureDate": dep_iso,
+                "returnDate": ret_iso,
+                "totalFlights": len(flights),
+                "minPrice": min_price,
+                "maxPrice": max_price,
+                "cheapestPrice": cheapest.price,
+                "cheapestAirline": cheapest.airline,
+                "flightsUnderThresholdCount": len(flights_under),
+                "flyyvLink": flyyv_link,
+            }
+        )
+
+    # Prepare header labels
+    start_label = params.earliestDeparture.strftime("%d %B %Y")
+    end_label = params.latestDeparture.strftime("%d %B %Y")
+
+    if threshold is not None and any_under:
+        subject_suffix = f"deals under £{int(threshold)}"
+    elif threshold is not None:
+        subject_suffix = f"no fares under £{int(threshold)}"
+    else:
+        subject_suffix = "summary update"
+
+    subject = f"Flyyv smart alert: {origin} \u2192 {destination} {subject_suffix}"
+
+    lines: List[str] = []
+
+    nights_label = (
+        f"{params.minStayDays} to {params.maxStayDays} nights"
+        if params.minStayDays != params.maxStayDays
+        else f"{params.minStayDays} nights"
+    )
+
+    if threshold is not None:
+        lines.append(
+            f"Smart watch: {origin} \u2192 {destination}, "
+            f"{alert.cabin.title()} class, {nights_label}, "
+            f"1 pax, max £{int(threshold)}"
+        )
+    else:
+        lines.append(
+            f"Smart watch: {origin} \u2192 {destination}, "
+            f"{alert.cabin.title()} class, {nights_label}, 1 pax"
+        )
+
+    lines.append(f"Date window: {start_label} to {end_label}")
+    lines.append("")
+    lines.append("We scanned many date combinations in this window and summarised the results for you.")
+    lines.append("")
+
+    # Deals under threshold section
+    if threshold is not None:
+        if any_under:
+            lines.append(f"Deals found under your £{int(threshold)} limit:")
+            lines.append("")
+            for p in pairs_summary:
+                if p["flightsUnderThresholdCount"] <= 0:
+                    continue
+
+                dep_dt = datetime.fromisoformat(p["departureDate"])
+                ret_dt = datetime.fromisoformat(p["returnDate"])
+                dep_label = dep_dt.strftime("%d %b")
+                ret_label = ret_dt.strftime("%d %b")
+
+                lines.append(
+                    f"{dep_label} \u2192 {ret_label}: "
+                    f"{p['totalFlights']} flights, "
+                    f"range £{int(p['minPrice'])} to £{int(p['maxPrice'])}, "
+                    f"cheapest £{int(p['cheapestPrice'])} with {p['cheapestAirline']}"
+                )
+                if p["flyyvLink"]:
+                    lines.append(f"  View in Flyyv: {p['flyyvLink']}")
+                lines.append("")
+        else:
+            lines.append(
+                f"No fares under £{int(threshold)} were found for any watched dates in this scan."
+            )
+            lines.append("")
+
+    # Summary of all watched dates
+    lines.append("Summary of all watched dates:")
+    lines.append("")
+
+    for p in pairs_summary:
+        dep_dt = datetime.fromisoformat(p["departureDate"])
+        ret_dt = datetime.fromisoformat(p["returnDate"])
+        dep_label = dep_dt.strftime("%d %b")
+        ret_label = ret_dt.strftime("%d %b")
+
+        if p["totalFlights"] == 0:
+            note = "no flights returned"
+        else:
+            note = (
+                f"{p['totalFlights']} flights, "
+                f"range £{int(p['minPrice'])} to £{int(p['maxPrice'])}"
+            )
+
+        if threshold is not None and p["flightsUnderThresholdCount"] > 0:
+            note += f", {p['flightsUnderThresholdCount']} under £{int(threshold)}"
+
+        lines.append(f"{dep_label} \u2192 {ret_label}: {note}")
+
+    lines.append("")
+    lines.append("You are receiving this because you created a Flyyv smart price alert.")
     lines.append("To stop these alerts, delete the alert in your Flyyv profile.")
 
     body = "\n".join(lines)
@@ -1351,7 +1522,7 @@ def process_alert(alert: Alert, db: Session) -> None:
         db.commit()
         return
 
-    # For now, both modes share the same search behaviour
+    # Search behaviour is shared for now, mode only affects formatting
     params = build_search_params_for_alert(alert)
     max_pairs, max_offers_pair, max_offers_total = effective_caps(params)
     print(
@@ -1414,9 +1585,10 @@ def process_alert(alert: Alert, db: Session) -> None:
 
     if should_send:
         try:
-            # For now, even smart alerts use the single date email, later we will
-            # teach this branch to call a smart summary email builder instead.
-            send_alert_email_for_alert(alert, cheapest, params)
+            if alert.mode == "smart":
+                send_smart_alert_email(alert, options, params)
+            else:
+                send_alert_email_for_alert(alert, cheapest, params)
             sent_flag = True
             print(f"[alerts] process_alert EMAIL_SENT id={alert.id} mode={alert.mode}")
         except Exception as e:
