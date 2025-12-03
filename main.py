@@ -1400,8 +1400,6 @@ def send_smart_alert_email(alert: Alert, options: List[FlightOption], params: Se
             f"{alert.cabin.title()} class, {nights_label}, 1 pax"
         )
 
-    lines.append(f"Date window: {start_label} to {end_label}")
-    lines.append("")
         lines.append(f"Date window: {start_label} to {end_label}")
     lines.append("")
 
