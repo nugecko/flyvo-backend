@@ -14,7 +14,7 @@ SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.smtp2go.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USERNAME = os.environ.get("SMTP_USERNAME")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
-ALERT_FROM_EMAIL = os.environ.get("ALERT_FROM_EMAIL", "alerts@flyyv.com")
+ALERT_FROM_EMAIL = os.environ.get("ALERT_FROM_EMAIL", "alert@flyyv.com")
 
 def send_alert_email_for_alert(alert, cheapest, params) -> None:
     """
@@ -32,7 +32,7 @@ def send_alert_email_for_alert(alert, cheapest, params) -> None:
         raise HTTPException(status_code=500, detail="Alert has no user_email")
 
     subject = (
-        f"Flyyv alert: {alert.origin} \u2192 {alert.destination} "
+        f"Flyyv Alert: {alert.origin} \u2192 {alert.destination} "
         f"from £{int(cheapest.price)}"
     )
 
@@ -91,8 +91,8 @@ def build_flyyv_link(params, departure: str, return_date: str) -> str:
 
 def send_smart_alert_email(alert, options: List, params) -> None:
     """
-    Smart alert email: scans multiple date pairs and produces a summary message.
-    Moved here unchanged so that all alert email formatting is centralised.
+    FlyyvFlex Monitor email:
+    scans multiple date pairs in a flexible window and produces a summary message.
     """
     if not (SMTP_USERNAME and SMTP_PASSWORD and ALERT_FROM_EMAIL):
         raise HTTPException(
@@ -156,35 +156,67 @@ def send_smart_alert_email(alert, options: List, params) -> None:
     start_label = params.earliestDeparture.strftime("%d %B %Y")
     end_label = params.latestDeparture.strftime("%d %B %Y")
 
-    if threshold is not None and any_under:
-        subject_suffix = f"deals under £{int(threshold)}"
-    elif threshold is not None:
-        subject_suffix = f"no fares under £{int(threshold)}"
-    else:
-        subject_suffix = "summary update"
+    # Nights label, based on stay range in params
+    nights_text = None
+    min_nights = getattr(params, "minStayDays", None)
+    max_nights = getattr(params, "maxStayDays", None)
+    if isinstance(min_nights, int) and isinstance(max_nights, int):
+        if min_nights == max_nights:
+            nights_text = f"{min_nights}"
+        else:
+            nights_text = f"{min_nights} to {max_nights}"
 
-    subject = f"Flyyv smart alert: {origin} → {destination} {subject_suffix}"
+    combinations_checked = len(pairs_summary)
+
+    # Cheapest price across all options
+    cheapest_price_overall = None
+    if options:
+        cheapest_overall = min(options, key=lambda o: o.price)
+        try:
+            cheapest_price_overall = int(cheapest_overall.price)
+        except Exception:
+            cheapest_price_overall = None
+
+    # Subject
+    if cheapest_price_overall is not None:
+        subject = (
+            f"FlyyvFlex Alert: {origin} \u2192 {destination} "
+            f"from £{cheapest_price_overall}"
+        )
+    elif threshold is not None and any_under:
+        subject = (
+            f"FlyyvFlex Alert: {origin} \u2192 {destination} "
+            f"fares under £{int(threshold)}"
+        )
+    elif threshold is not None:
+        subject = (
+            f"FlyyvFlex Alert: {origin} \u2192 {destination} "
+            f"no fares under £{int(threshold)}"
+        )
+    else:
+        subject = f"FlyyvFlex Alert: {origin} \u2192 {destination} update"
 
     lines: List[str] = []
 
-    if threshold is not None:
-        lines.append(
-            f"Smart watch: {origin} → {destination}, "
-            f"{alert.cabin.title()} class, max £{int(threshold)}"
-        )
-    else:
-        lines.append(
-            f"Smart watch: {origin} → {destination}, "
-            f"{alert.cabin.title()} class"
-        )
-
+    # Header
+    lines.append(
+        f"FlyyvFlex Monitor: {origin} → {destination}, "
+        f"{alert.cabin.title()} class"
+    )
+    if nights_text:
+        lines.append(f"Nights: {nights_text}")
     lines.append(f"Date window: {start_label} to {end_label}")
+    lines.append(f"Possible combinations checked: {combinations_checked}")
     lines.append("")
 
+    # Intro
     if threshold is not None:
         lines.append(f"Max budget: £{int(threshold)}")
     lines.append("")
-    lines.append("We scanned many date combinations in this window and picked the best options for you.")
+    lines.append(
+        "We scanned all matching date combinations in your selected window "
+        "and highlighted the best fares available right now."
+    )
     lines.append("")
 
     # Select top options
@@ -199,7 +231,7 @@ def send_smart_alert_email(alert, options: List, params) -> None:
         MAX_RESULTS = 10
         top_pairs_sorted = sorted(top_pairs, key=lambda x: x["cheapestPrice"])[:MAX_RESULTS]
 
-        lines.append("Top flight deals in your window:")
+        lines.append("Top flight deals in your FlyyvFlex window:")
         lines.append("")
 
         for p in top_pairs_sorted:
@@ -219,10 +251,10 @@ def send_smart_alert_email(alert, options: List, params) -> None:
             lines.append(line)
 
     lines.append("")
-    lines.append("View all your alerts:")
+    lines.append("View and manage your alerts:")
     lines.append("https://flyyv.com")
     lines.append("")
-    lines.append("You are receiving this because you created a Flyyv smart price alert.")
+    lines.append("You are receiving this email because you created a FlyyvFlex Monitor alert.")
     lines.append("To stop these alerts, delete the alert in your Flyyv profile.")
 
     body = "\n".join(lines)
