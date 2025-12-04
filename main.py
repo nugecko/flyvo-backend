@@ -2642,6 +2642,7 @@ def update_alert(
                 origin=alert.origin,
                 destination=alert.destination,
                 cabin=alert.cabin,
+                search_mode=alert.search_mode,
                 departure_start=alert.departure_start,
                 departure_end=alert.departure_end,
                 return_start=alert.return_start,
