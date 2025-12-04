@@ -1235,7 +1235,7 @@ def build_search_params_for_alert(alert: Alert) -> SearchParams:
         min_stay = 1
         max_stay = 21
 
-    return SearchParams(
+        return SearchParams(
         origin=alert.origin,
         destination=alert.destination,
         earliestDeparture=dep_start,
@@ -1246,6 +1246,9 @@ def build_search_params_for_alert(alert: Alert) -> SearchParams:
         cabin=alert.cabin or "BUSINESS",
         passengers=1,
         stopsFilter=None,
+        # Alerts are lighter than interactive searches to avoid overloading Duffel
+        maxOffersPerPair=120,
+        maxOffersTotal=1200,
     )
 
 
