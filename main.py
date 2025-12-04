@@ -1229,28 +1229,28 @@ def build_search_params_for_alert(alert: Alert) -> SearchParams:
     dep_end = alert.departure_end or alert.departure_start
 
     if alert.return_start and alert.return_end:
-        min_stay = max(1, (alert.return_start - dep_start).days)
-        max_stay = max(min_stay, (alert.return_end - dep_start).days)
-    else:
-        min_stay = 1
-        max_stay = 21
+    min_stay = max(1, (alert.return_start - dep_start).days)
+    max_stay = max(min_stay, (alert.return_end - dep_start).days)
+else:
+    min_stay = 1
+    max_stay = 21
 
-        return SearchParams(
-        origin=alert.origin,
-        destination=alert.destination,
-        earliestDeparture=dep_start,
-        latestDeparture=dep_end,
-        minStayDays=min_stay,
-        maxStayDays=max_stay,
-        maxPrice=alert.max_price,
-        cabin=alert.cabin or "BUSINESS",
-        passengers=1,
-        stopsFilter=None,
-        # Alerts are lighter than interactive searches to avoid overloading Duffel
-        maxOffersPerPair=120,
-        maxOffersTotal=1200,
-    )
-
+# Return outside the if/else so it runs in all cases
+return SearchParams(
+    origin=alert.origin,
+    destination=alert.destination,
+    earliestDeparture=dep_start,
+    latestDeparture=dep_end,
+    minStayDays=min_stay,
+    maxStayDays=max_stay,
+    maxPrice=alert.max_price,
+    cabin=alert.cabin or "BUSINESS",
+    passengers=1,
+    stopsFilter=None,
+    # Alerts are lighter than interactive searches to avoid overloading Duffel
+    maxOffersPerPair=120,
+    maxOffersTotal=1200,
+)
 
 def send_alert_email_for_alert(alert: Alert, cheapest: FlightOption, params: SearchParams) -> None:
     if not (SMTP_USERNAME and SMTP_PASSWORD and ALERT_FROM_EMAIL):
