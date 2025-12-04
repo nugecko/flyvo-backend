@@ -1605,11 +1605,12 @@ def process_alert(alert: Alert, db: Session) -> None:
 
     if should_send:
         try:
-            if alert.mode == "smart":
-                # Smart alerts get a summary email with multiple date pairs
+            if alert.mode == "smart" or alert.alert_type == "scheduled_3x":
+                # Smart mode or scheduled window alerts get a summary email
+                # with multiple date pairs, like a Smart Search
                 send_smart_alert_email(alert, options_sorted, params)
             else:
-                # Single mode keeps the simple one date pair email
+                # Other modes keep the simple one date pair email
                 send_alert_email_for_alert(alert, cheapest, params)
 
             sent_flag = True
