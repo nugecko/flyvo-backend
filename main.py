@@ -1417,9 +1417,9 @@ def send_smart_alert_email(alert: Alert, options: List[FlightOption], params: Se
     if threshold is not None:
         lines.append(f"Max budget: £{int(threshold)}")
     else:
-        lines.append("Trip details:")
-    lines.append("")
-    lines.append("We scanned many date combinations in this window and picked the best options for you.")
+        lines.append(
+            f"Trip details: {origin} \u2192 {destination}, {alert.cabin.title()} class"
+        )
     lines.append("")
 
     # Build list of candidate pairs
