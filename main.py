@@ -1588,7 +1588,7 @@ def process_alert(alert: Alert, db: Session) -> None:
 
     sent_flag = False
 
-        if should_send:
+    if should_send:
         try:
             if alert.mode == "smart":
                 # Smart mode alerts get a summary email
@@ -1597,7 +1597,7 @@ def process_alert(alert: Alert, db: Session) -> None:
             else:
                 # Other modes keep the simple one date pair email
                 send_alert_email_for_alert(alert, cheapest, params)
-                
+
             sent_flag = True
             print(f"[alerts] process_alert EMAIL_SENT id={alert.id} mode={alert.mode}")
         except Exception as e:
