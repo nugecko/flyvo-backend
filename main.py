@@ -1269,8 +1269,8 @@ def send_alert_email_for_alert(alert: Alert, cheapest: FlightOption, params: Sea
         raise HTTPException(status_code=500, detail="Alert has no user_email")
 
     subject = (
-        f"Flyyv alert: {alert.origin} \u2192 {alert.destination} "
-        f"from £{int(cheapest.price)}"
+    f"Flyyv Alert: {alert.origin} \u2192 {alert.destination} "
+    f"from £{int(cheapest.price)}"
     )
 
     dep_dt = datetime.fromisoformat(cheapest.departureDate)
@@ -1300,7 +1300,7 @@ def send_alert_email_for_alert(alert: Alert, cheapest: FlightOption, params: Sea
 
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = ALERT_FROM_EMAIL
+    msg["From"] = f"FLYYV <{ALERT_FROM_EMAIL}>"
     msg["To"] = to_email
     msg.set_content(body)
 
