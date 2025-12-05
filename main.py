@@ -1078,13 +1078,25 @@ def run_search_job(job_id: str):
                             print(f"[JOB {job_id}] Future error for pair {dep} -> {ret}: {e}")
                             continue
 
-                        if not batch_mapped:
+                                                if not batch_mapped:
                             continue
 
                         existing = JOB_RESULTS.get(job_id, [])
                         combined = existing + batch_mapped
 
+                        # Apply filters to all collected offers so far
                         filtered = apply_filters(combined, job.params)
+
+                        # Debug: airline distribution before balancing
+                        airline_counts = Counter(
+                            opt.airlineCode or opt.airline for opt in filtered
+                        )
+                        print(
+                            f"[JOB {job_id}] airline mix before balance: "
+                            f"{dict(airline_counts)}"
+                        )
+
+                        # Balance across airlines and enforce max_total cap
                         balanced = balance_airlines(filtered, max_total=max_offers_total)
 
                         if len(balanced) > max_offers_total:
@@ -1094,6 +1106,7 @@ def run_search_job(job_id: str):
                         total_count = len(balanced)
 
                         print(f"[JOB {job_id}] partial results updated, count={total_count}")
+
 
                         if total_count >= max_offers_total:
                             print(f"[JOB {job_id}] Reached max_offers_total={max_offers_total}, stopping")
