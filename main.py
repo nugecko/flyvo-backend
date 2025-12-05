@@ -934,7 +934,7 @@ def run_duffel_scan(params: SearchParams) -> List[FlightOption]:
         f"[search] collected total {len(collected_offers)} offers across all pairs"
     )
 
-    mapped: List[FlightOption] = [
+        mapped: List[FlightOption] = [
         map_duffel_offer_to_option(offer, dep, ret)
         for offer, dep, ret in collected_offers
     ]
@@ -951,6 +951,88 @@ def run_duffel_scan(params: SearchParams) -> List[FlightOption]:
     print(f"[search] balance_airlines returned {len(balanced)} offers")
     print("[search] run_duffel_scan DONE")
     return balanced
+
+    # Now work per date pair instead of globally
+    print("[search] starting per date pair mapping, filtering and balancing")
+
+    # Bucket raw Duffel offers by date pair first
+    offers_by_pair: Dict[Tuple[date, date], List[dict]] = defaultdict(list)
+    for offer, dep, ret in collected_offers:
+        offers_by_pair[(dep, ret)].append(offer)
+
+    all_results: List[FlightOption] = []
+    total_added = 0
+    hit_global_cap = False
+
+    for dep, ret in date_pairs:
+        pair_key = (dep, ret)
+        pair_offers = offers_by_pair.get(pair_key, [])
+        if not pair_offers:
+            print(f"[search] no offers to map for dep={dep} ret={ret}")
+            continue
+
+        # Map to FlightOption for this specific date pair
+        mapped_pair: List[FlightOption] = [
+            map_duffel_offer_to_option(offer, dep, ret) for offer in pair_offers
+        ]
+        print(
+            f"[search] pair dep={dep} ret={ret}: mapped {len(mapped_pair)} offers"
+        )
+
+        # Apply filters per pair
+        filtered_pair = apply_filters(mapped_pair, params)
+        print(
+            f"[search] pair dep={dep} ret={ret}: filtered down to {len(filtered_pair)} offers"
+        )
+
+        if not filtered_pair:
+            print(f"[search] pair dep={dep} ret={ret}: no offers after filters")
+            continue
+
+        # Debug airline distribution before balancing for this pair
+        airline_counts_pair = Counter(
+            opt.airlineCode or opt.airline for opt in filtered_pair
+        )
+        print(
+            f"[search] airline mix before balance for dep={dep} ret={ret}: {dict(airline_counts_pair)}"
+        )
+
+        # Enforce per pair cap
+        # Note: filtered_pair is already sorted by price inside apply_filters
+        if len(filtered_pair) > max_offers_pair:
+            print(
+                f"[search] pair dep={dep} ret={ret}: capping offers from "
+                f"{len(filtered_pair)} to {max_offers_pair} using max_offers_pair"
+            )
+            filtered_pair = filtered_pair[:max_offers_pair]
+
+        # Balance airlines within this specific date pair
+        balanced_pair = balance_airlines(filtered_pair, max_total=max_offers_pair)
+        print(
+            f"[search] pair dep={dep} ret={ret}: balance_airlines returned "
+            f"{len(balanced_pair)} offers"
+        )
+
+        # Respect global max_offers_total as we aggregate results
+        for opt in balanced_pair:
+            if total_added >= max_offers_total:
+                print(
+                    f"[search] global cap reached while adding dep={dep} ret={ret}, "
+                    f"max_offers_total={max_offers_total}"
+                )
+                hit_global_cap = True
+                break
+            all_results.append(opt)
+            total_added += 1
+
+        if hit_global_cap:
+            break
+
+    print(
+        f"[search] run_duffel_scan DONE, returning {len(all_results)} offers "
+        f"from {len(date_pairs)} date pairs, hit_global_cap={hit_global_cap}"
+    )
+    return all_results
 
 # ===== END SECTION: SHARED SEARCH HELPERS =====
 
