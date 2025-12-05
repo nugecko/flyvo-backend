@@ -484,7 +484,7 @@ def duffel_create_offer_request(
         }
     }
 
-    resp = requests.post(url, json=payload, headers=duffel_headers(), timeout=10)
+    resp = requests.post(url, json=payload, headers=duffel_headers(), timeout=25)
     if resp.status_code >= 400:
         print("Duffel offer_requests error:", resp.status_code, resp.text)
         raise HTTPException(status_code=502, detail="Duffel API error")
@@ -501,7 +501,7 @@ def duffel_list_offers(offer_request_id: str, limit: int = 300) -> List[dict]:
         "sort": "total_amount",
     }
 
-    resp = requests.get(url, params=params, headers=duffel_headers(), timeout=10)
+    resp = requests.get(url, params=params, headers=duffel_headers(), timeout=25)
     if resp.status_code >= 400:
         print("Duffel offers error:", resp.status_code, resp.text)
         raise HTTPException(status_code=502, detail="Duffel API error")
