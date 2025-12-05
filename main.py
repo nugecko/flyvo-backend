@@ -941,16 +941,16 @@ def run_duffel_scan(params: SearchParams) -> List[FlightOption]:
     print(f"[search] mapped {len(mapped)} offers to FlightOption")
 
     filtered = apply_filters(mapped, params)
-print(f"[search] filtered down to {len(filtered)} offers")
+    print(f"[search] filtered down to {len(filtered)} offers")
 
-# Debug airline distribution before balancing
-airline_counts = Counter(opt.airlineCode or opt.airline for opt in filtered)
-print(f"[search] airline mix before balance: {dict(airline_counts)}")
+    # Debug airline distribution before balancing
+    airline_counts = Counter(opt.airlineCode or opt.airline for opt in filtered)
+    print(f"[search] airline mix before balance: {dict(airline_counts)}")
 
-balanced = balance_airlines(filtered, max_total=max_offers_total)
-print(f"[search] balance_airlines returned {len(balanced)} offers")
-print("[search] run_duffel_scan DONE")
-return balanced
+    balanced = balance_airlines(filtered, max_total=max_offers_total)
+    print(f"[search] balance_airlines returned {len(balanced)} offers")
+    print("[search] run_duffel_scan DONE")
+    return balanced
 
 # ===== END SECTION: SHARED SEARCH HELPERS =====
 
