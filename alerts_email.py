@@ -1,13 +1,14 @@
 import os
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime
 from typing import List, Dict, Tuple, Any
 
 from fastapi import HTTPException
 
-# Local types are only used for type hints, so we do not need hard imports here.
-# The caller passes real Alert, FlightOption and SearchParams objects.
-# from models import Alert
-# from main import FlightOption, SearchParams
+# =======================================
+# SECTION: SMTP CONFIG AND CONSTANTS
+# =======================================
 
 # Basic SMTP config, read from environment
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.smtp2go.com")
@@ -16,6 +17,15 @@ SMTP_USERNAME = os.environ.get("SMTP_USERNAME")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 ALERT_FROM_EMAIL = os.environ.get("ALERT_FROM_EMAIL", "alert@flyyv.com")
 
+# FRONTEND_BASE_URL must come from environment
+FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "https://flyyv.com")
+
+
+# =======================================
+# SECTION: ONE OFF ALERT EMAIL
+# =======================================
+
+# ===== START ONE OFF ALERT EMAIL =====
 def send_alert_email_for_alert(alert, cheapest, params) -> None:
     """
     One off alert email:
@@ -53,7 +63,9 @@ def send_alert_email_for_alert(alert, cheapest, params) -> None:
         f"with {cheapest.airline} ({cheapest.airlineCode or ''})"
     )
     lines.append("")
-    lines.append("To view this alert and explore more dates, go to your Flyyv dashboard:")
+    lines.append(
+        "To view this alert and explore more dates, go to your Flyyv dashboard:"
+    )
     lines.append("https://flyyv.com")
     lines.append("")
     lines.append("You are receiving this because you created a Flyyv price alert.")
@@ -71,12 +83,14 @@ def send_alert_email_for_alert(alert, cheapest, params) -> None:
         server.starttls()
         server.login(SMTP_USERNAME, SMTP_PASSWORD)
         server.send_message(msg)
-
-# FRONTEND_BASE_URL must come from environment,
-# same pattern used in the main file.
-FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "https://flyyv.com")
+# ===== END ONE OFF ALERT EMAIL =====
 
 
+# =======================================
+# SECTION: HELPER LINK BUILDERS
+# =======================================
+
+# ===== START HELPER LINK BUILDERS =====
 def build_flyyv_link(params, departure: str, return_date: str) -> str:
     base = FRONTEND_BASE_URL.rstrip("/")
     return (
@@ -87,8 +101,14 @@ def build_flyyv_link(params, departure: str, return_date: str) -> str:
         f"&cabin={params.cabin}"
         f"&passengers={params.passengers}"
     )
+# ===== END HELPER LINK BUILDERS =====
 
 
+# =======================================
+# SECTION: SMART ALERT SUMMARY EMAIL
+# =======================================
+
+# ===== START SMART ALERT SUMMARY EMAIL =====
 def send_smart_alert_email(alert, options: List, params) -> None:
     """
     FlyyvFlex Monitor email:
@@ -200,7 +220,7 @@ def send_smart_alert_email(alert, options: List, params) -> None:
 
     # Header
     lines.append(
-        f"FlyyvFlex Monitor: {origin} → {destination}, "
+        f"FlyyvFlex Monitor: {origin} \u2192 {destination}, "
         f"{alert.cabin.title()} class"
     )
     if nights_text:
@@ -221,7 +241,8 @@ def send_smart_alert_email(alert, options: List, params) -> None:
 
     # Select top options
     top_pairs = [
-        p for p in pairs_summary
+        p
+        for p in pairs_summary
         if p.get("totalFlights", 0) > 0 and p.get("cheapestPrice") is not None
     ]
 
@@ -255,12 +276,14 @@ def send_smart_alert_email(alert, options: List, params) -> None:
                 line += "  (within your limit)"
 
             lines.append(line)
-            
+
     lines.append("")
     lines.append("View and manage your alerts:")
     lines.append("https://flyyv.com")
     lines.append("")
-    lines.append("You are receiving this email because you created a FlyyvFlex Monitor alert.")
+    lines.append(
+        "You are receiving this email because you created a FlyyvFlex Monitor alert."
+    )
     lines.append("To stop these alerts, delete the alert in your Flyyv profile.")
 
     body = "\n".join(lines)
@@ -275,3 +298,4 @@ def send_smart_alert_email(alert, options: List, params) -> None:
         server.starttls()
         server.login(SMTP_USERNAME, SMTP_PASSWORD)
         server.send_message(msg)
+# ===== END SMART ALERT SUMMARY EMAIL =====
