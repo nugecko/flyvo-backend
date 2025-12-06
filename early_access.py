@@ -19,10 +19,18 @@ def send_early_access_welcome_email(to_email: str) -> None:
     print(f"[early_access] Preparing welcome email for {to_email}")
 
     host = os.getenv("EMAIL_HOST", "mail-eu.smtp2go.com")
-    port = int(os.getenv("EMAIL_PORT", "587"))
+    port_raw = os.getenv("EMAIL_PORT", "587")
     user = os.getenv("EMAIL_USER")
     password = os.getenv("EMAIL_PASSWORD")
     from_email = os.getenv("EMAIL_FROM", user) or user
+
+    print(f"[early_access] SMTP config host={host} port={port_raw} user={user}")
+
+    try:
+        port = int(port_raw)
+    except Exception as e:
+        print(f"[early_access] Invalid EMAIL_PORT value '{port_raw}': {e}")
+        return
 
     if not user or not password:
         print("[early_access] EMAIL_USER or EMAIL_PASSWORD not set, skipping welcome email")
@@ -43,11 +51,15 @@ def send_early_access_welcome_email(to_email: str) -> None:
     msg["To"] = to_email
 
     try:
-        with smtplib.SMTP(host, port) as server:
+        print("[early_access] Before SMTP connect")
+        with smtplib.SMTP(host, port, timeout=10) as server:
+            print("[early_access] Connected to SMTP server")
             server.starttls()
+            print("[early_access] STARTTLS done")
             server.login(user, password)
+            print("[early_access] Logged in to SMTP")
             server.send_message(msg)
-        print(f"[early_access] Welcome email sent to {to_email}")
+            print(f"[early_access] Welcome email sent to {to_email}")
     except Exception as e:
         # Do not break signup if email fails
         print(f"[early_access] Failed to send welcome email to {to_email}: {e}")
