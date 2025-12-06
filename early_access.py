@@ -27,7 +27,7 @@ def early_access_signup(payload: EarlyAccessInput):
         if existing:
             return {"message": "Already subscribed"}
 
-        # Create new subscriber
+                # Create new subscriber
         subscriber = EarlyAccessSubscriber(email=payload.email)
         db.add(subscriber)
         db.commit()
