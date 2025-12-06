@@ -16,7 +16,7 @@ class EarlyAccessInput(BaseModel):
     email: EmailStr
 
 def send_early_access_welcome_email(to_email: str) -> None:
-    logger.info(f"[early_access] Preparing welcome email for {to_email}")
+    print(f"[early_access] Preparing welcome email for {to_email}")
 
     host = os.getenv("EMAIL_HOST", "mail-eu.smtp2go.com")
     port = int(os.getenv("EMAIL_PORT", "587"))
@@ -25,7 +25,7 @@ def send_early_access_welcome_email(to_email: str) -> None:
     from_email = os.getenv("EMAIL_FROM", user) or user
 
     if not user or not password:
-        logger.error("[early_access] EMAIL_USER or EMAIL_PASSWORD not set, skipping welcome email")
+        print("[early_access] EMAIL_USER or EMAIL_PASSWORD not set, skipping welcome email")
         return
 
     subject = "Welcome to Flyyv early access"
@@ -47,14 +47,14 @@ def send_early_access_welcome_email(to_email: str) -> None:
             server.starttls()
             server.login(user, password)
             server.send_message(msg)
-        logger.info(f"[early_access] Welcome email sent to {to_email}")
+        print(f"[early_access] Welcome email sent to {to_email}")
     except Exception as e:
         # Do not break signup if email fails
-        logger.error(f"[early_access] Failed to send welcome email to {to_email}: {e}")
+        print(f"[early_access] Failed to send welcome email to {to_email}: {e}")
 
 @router.post("/early-access")
 def early_access_signup(payload: EarlyAccessInput):
-    logger.info(f"[early_access] Signup request received for {payload.email}")
+    print(f"[early_access] Signup request received for {payload.email}")
     db: Session = SessionLocal()
 
     try:
@@ -65,22 +65,22 @@ def early_access_signup(payload: EarlyAccessInput):
             .first()
         )
         if existing:
-            logger.info(f"[early_access] {payload.email} already subscribed")
+            print(f"[early_access] {payload.email} already subscribed")
             return {"message": "Already subscribed"}
 
         # Create new subscriber
         subscriber = EarlyAccessSubscriber(email=payload.email)
         db.add(subscriber)
         db.commit()
-        logger.info(f"[early_access] New subscriber saved: {payload.email}")
+        print(f"[early_access] New subscriber saved: {payload.email}")
 
         # Send welcome email, do not block on failure
         send_early_access_welcome_email(payload.email)
 
         return {"message": "Success"}
-    except Exception:
+    except Exception as e:
         db.rollback()
-        logger.exception("[early_access] Error during signup")
+        print(f"[early_access] Error during signup for {payload.email}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         db.close()
