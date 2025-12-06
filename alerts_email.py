@@ -301,3 +301,29 @@ def send_smart_alert_email(alert, options: List, params) -> None:
         server.login(SMTP_USERNAME, SMTP_PASSWORD)
         server.send_message(msg)
 # ===== END SMART ALERT SUMMARY EMAIL =====
+
+# =======================================
+# SECTION: EARLY ACCESS WELCOME EMAIL
+# =======================================
+
+def send_early_access_welcome_email(to_email: str):
+    subject = "Welcome aboard Flyyv"
+    body = (
+        "Hi there,\n\n"
+        "Daniel here, founder of Flyyv.\n\n"
+        "Thank you for signing up for early access. "
+        "You will be among the very first to try our new platform dedicated to finding exceptional business fares.\n\n"
+        "I really appreciate you joining us this early.\n\n"
+        "Talk soon,\n"
+        "Daniel\n"
+        "Founder, Flyyv"
+    )
+
+    send_single_email(
+        to_email=to_email,
+        subject=subject,
+        body=body,
+    )
+
+# ===== END SECTION: EARLY ACCESS WELCOME EMAIL =====
+
