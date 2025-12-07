@@ -1179,11 +1179,62 @@ def process_date_pair_offers(
         print(f"[PAIR {dep} -> {ret}] Unexpected Duffel error: {e}")
         return []
 
+    # Map the normal mixed-connection offers
     batch_mapped: List[FlightOption] = [
         map_duffel_offer_to_option(offer, dep, ret) for offer in offers_json
     ]
-    return batch_mapped
 
+    # Fetch a small set of direct-only offers for this pair
+    try:
+        direct_options = fetch_direct_only_offers(
+            origin=params.origin,
+            destination=params.destination,
+            dep_date=dep,
+            ret_date=ret,
+            passengers=params.passengers,
+            cabin=params.cabin,
+            per_pair_limit=15,
+        )
+    except Exception as e:
+        print(f"[PAIR {dep} -> {ret}] direct_only error: {e}")
+        direct_options = []
+
+    if direct_options:
+        # Build a simple de-dup key so we do not add exact duplicates
+        seen = set()
+        for opt in batch_mapped:
+            key = (
+                opt.airlineCode or opt.airline,
+                opt.departureDate,
+                opt.returnDate,
+                opt.stops,
+                opt.originAirport,
+                opt.destinationAirport,
+            )
+            seen.add(key)
+
+        added = 0
+        for opt in direct_options:
+            key = (
+                opt.airlineCode or opt.airline,
+                opt.departureDate,
+                opt.returnDate,
+                opt.stops,
+                opt.originAirport,
+                opt.destinationAirport,
+            )
+            if key in seen:
+                continue
+            batch_mapped.append(opt)
+            seen.add(key)
+            added += 1
+
+        print(
+            f"[PAIR {dep} -> {ret}] merged {added} direct-only offers, "
+            f"total now {len(batch_mapped)}"
+        )
+
+    return batch_mapped
 
 def run_search_job(job_id: str):
     job = JOBS.get(job_id)
