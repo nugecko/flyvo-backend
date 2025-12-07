@@ -1275,10 +1275,15 @@ def run_search_job(job_id: str):
 
         final_results = JOB_RESULTS.get(job_id, [])
 
+        # Apply a global cap so no single airline dominates the async results
+        final_results = apply_global_airline_cap(final_results, max_share=0.5)
+        JOB_RESULTS[job_id] = final_results
+
         job.status = JobStatus.COMPLETED
         job.updated_at = datetime.utcnow()
         JOBS[job_id] = job
         print(f"[JOB {job_id}] Completed with {len(final_results)} options")
+
 
     except Exception as e:
         job.status = JobStatus.FAILED
